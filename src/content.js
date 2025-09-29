@@ -1,29 +1,26 @@
-// === Linkedin Job Helper: title coloring (VAS fallback) + click-to-send details with templated payload + sticky verdicts ===
+// === Linkedin Job Helper: title coloring by API verdict + VAS fallback ===
 (() => {
   if (window.__LVH_RUNNING__) return;
   window.__LVH_RUNNING__ = true;
 
-  // ----------------- Constants & selectors -----------------
-  const STATE_RE = /\b(Viewed|Applied|Saved)\b/i; // detect V/A/S in footer text
-  const CARD_SEL =
-    'li[data-occludable-job-id], li.scaffold-layout__list-item, li.occludable-update';
-  const FOOTER_SEL =
-    '.job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state';
+  // --------- Selectors / Regex ----------
+  const STATE_TOKENS = {
+    viewed: /(^|\b)Viewed(\b|$)/i,
+    applied: /(^|\b)Applied(\b|$)/i,
+    saved: /(^|\b)Saved(\b|$)/i
+  };
+  const CARD_SEL = 'li[data-occludable-job-id], li.scaffold-layout__list-item, li.occludable-update';
+  const FOOTER_SEL = '.job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state';
   const INNER_CARD_SEL = '.job-card-container';
   const TITLE_SEL = 'a.job-card-container__link, a[href*="/jobs/view/"]';
+  const RIGHT_PANE_HTML_SEL = '.jobs-description.job-details-module, .jobs-description__container, #job-details';
 
-  const DETAILS_ROOT_SEL =
-    '.jobs-description.job-details-module, .jobs-box--full-width.job-details-module';
-  const DETAILS_HTML_SEL = '#job-details, .jobs-description__content';
-
-  // ----------------- Settings -----------------
+  // --------- Settings (API) ----------
   let SETTINGS = { apiUrl: '', apiKey: '', requestPayload: '' };
-  chrome.storage.sync.get(['apiUrl', 'apiKey', 'requestPayload']).then((v) => {
-    SETTINGS = {
-      apiUrl: v.apiUrl || '',
-      apiKey: v.apiKey || '',
-      requestPayload: v.requestPayload || ''
-    };
+  chrome.storage.sync.get(['apiUrl', 'apiKey', 'requestPayload']).then(v => {
+    SETTINGS.apiUrl = v.apiUrl || '';
+    SETTINGS.apiKey = v.apiKey || '';
+    SETTINGS.requestPayload = v.requestPayload || '';
   });
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'sync') return;
@@ -32,321 +29,230 @@
     if (changes.requestPayload) SETTINGS.requestPayload = changes.requestPayload.newValue || '';
   });
 
-  // ----------------- Styles -----------------
-  (function ensureStyle() {
-    if (document.getElementById('lvh-style')) return;
-    const style = document.createElement('style');
-    style.id = 'lvh-style';
-    style.textContent = `
-      .lvh-title-red   { color: #d32f2f !important; }
-      .lvh-title-green { color: #2e7d32 !important; }
-    `;
-    document.head.appendChild(style);
-  })();
-
-  // ----------------- Verdict cache (sticky across refresh) -----------------
-  let VERDICT_CACHE = Object.create(null);
-  let verdictWriteTimer = null;
-
-  chrome.storage.local.get(['lvh_verdicts']).then((v) => {
-    if (v && v.lvh_verdicts && typeof v.lvh_verdicts === 'object') {
-      VERDICT_CACHE = { ...v.lvh_verdicts };
-      scan();
-    }
+  // --------- Verdict persistence ----------
+  let VERDICTS = {};
+  chrome.storage.local.get(['lvhVerdicts']).then(v => {
+    VERDICTS = v.lvhVerdicts || {};
+    scan();
   });
-
-  function scheduleVerdictPersist() {
-    if (verdictWriteTimer) return;
-    verdictWriteTimer = setTimeout(() => {
-      verdictWriteTimer = null;
-      chrome.storage.local.set({ lvh_verdicts: VERDICT_CACHE }).catch(() => {});
-    }, 400);
+  function saveVerdicts() {
+    chrome.storage.local.set({ lvhVerdicts: VERDICTS });
   }
 
-  // ----------------- Helpers -----------------
-  const getCardLI = (el) => el.closest?.(CARD_SEL) || null;
-  const getInnerCard = (li) => li.querySelector(INNER_CARD_SEL) || li;
-  const getTitleEl = (li) => getInnerCard(li).querySelector(TITLE_SEL);
+  // --------- Helpers ----------
+  const getCardLI = el => el.closest?.(CARD_SEL) || null;
+  const getInnerCard = li => li.querySelector(INNER_CARD_SEL) || li;
+  const getTitleEl = li => getInnerCard(li).querySelector(TITLE_SEL);
 
-  function getJobId(el) {
-    const li = getCardLI(el) || el.closest?.(CARD_SEL) || el;
-    const inner = li?.querySelector?.(INNER_CARD_SEL) || li;
-    return (
-      inner?.getAttribute?.('data-job-id') ||
-      li?.getAttribute?.('data-occludable-job-id') ||
-      ''
-    );
+  function getJobId(li) {
+    const inner = getInnerCard(li);
+    return inner.getAttribute('data-job-id') ||
+           li.getAttribute('data-occludable-job-id') || '';
   }
 
-  function vasState(li) {
-    const footerItems = li.querySelectorAll(FOOTER_SEL);
-    let viewed = false, applied = false, saved = false;
-    for (const f of footerItems) {
-      const txt = (f.textContent || '').trim();
-      if (/Viewed/i.test(txt)) viewed = true;
-      if (/Applied/i.test(txt)) applied = true;
-      if (/Saved/i.test(txt)) saved = true;
+  function getJobState(li) {
+    const res = { viewed: false, applied: false, saved: false };
+    const items = li.querySelectorAll(FOOTER_SEL);
+    for (const f of items) {
+      const t = (f.textContent || '').trim();
+      if (STATE_TOKENS.viewed.test(t)) res.viewed = true;
+      if (STATE_TOKENS.applied.test(t)) res.applied = true;
+      if (STATE_TOKENS.saved.test(t)) res.saved = true;
     }
-    return { viewed, applied, saved };
+    return res;
   }
 
-  function paintTitle(li) {
-    const id = getJobId(li);
-    if (!id) return;
-
-    const titleEl = getTitleEl(li);
-    if (!titleEl) return;
-
-    titleEl.classList.remove('lvh-title-red', 'lvh-title-green');
-
-    const verdictKnown = Object.prototype.hasOwnProperty.call(VERDICT_CACHE, id);
-    const verdict = VERDICT_CACHE[id];
-
-    if (verdictKnown) {
-      titleEl.classList.add(verdict === true ? 'lvh-title-green' : 'lvh-title-red');
+  function setTitleColor(li, color /* '', 'red', 'green' */) {
+    const a = getTitleEl(li);
+    if (!a) return;
+    if (color) {
+      a.style.color = color;
+      a.dataset.lvhTint = color;
     } else {
-      // No verdict yet → fallback to VAS coloring (any of V/A/S = red)
-      const { viewed, applied, saved } = vasState(li);
+      if (a.dataset.lvhTint) delete a.dataset.lvhTint;
+      a.style.removeProperty('color');
+    }
+  }
+
+  function repaintCard(li) {
+    const id = getJobId(li);
+    const verdict = id ? VERDICTS[id] : undefined; // true/false/undefined
+    const { viewed, applied, saved } = getJobState(li);
+
+    if (verdict === true) {
+      setTitleColor(li, 'green');
+    } else if (verdict === false) {
+      setTitleColor(li, 'red');
+    } else {
       if (viewed || applied || saved) {
-        titleEl.classList.add('lvh-title-red');
+        setTitleColor(li, 'red');
+      } else {
+        setTitleColor(li, '');
       }
     }
   }
 
   function scan(root = document) {
     const cards = root.querySelectorAll(CARD_SEL);
-    cards.forEach((li) => paintTitle(li));
+    cards.forEach(li => repaintCard(li));
   }
 
-  // ----------------- Details capture & send (on click) -----------------
-  let inFlightById = new Map(); // jobId -> true while sending
-  let lastSentId = null;
-
-  function extractRightPaneHtml() {
-    const root =
-      document.querySelector(DETAILS_ROOT_SEL) ||
-      document.querySelector('.jobs-description');
-    if (!root) return { html: '', text: '' };
-
-    const target =
-      root.querySelector(DETAILS_HTML_SEL) ||
-      root.querySelector('.jobs-description__content') ||
-      root;
-
-    const html = target?.innerHTML?.trim() || '';
-    const text = target?.innerText?.trim() || '';
-    return { html, text };
+  // --------- Detail extraction (right pane) ----------
+  function getRightPaneDescription() {
+    const pane = document.querySelector(RIGHT_PANE_HTML_SEL);
+    if (!pane) return '';
+    const jd = pane.querySelector('#job-details');
+    const node = jd || pane;
+    return (node.innerText || '').trim();
   }
 
-  function extractBasicFromCard(li) {
-    const inner = getInnerCard(li);
-    const id =
-      inner.getAttribute('data-job-id') ||
-      li.getAttribute('data-occludable-job-id') ||
-      '';
-    const titleA = inner.querySelector(TITLE_SEL);
-    const title = titleA?.textContent?.trim() || '';
-    const link = titleA?.href || '';
-    const company =
-      inner.querySelector(
-        '.artdeco-entity-lockup__subtitle, [class*="entity-lockup__subtitle"]'
-      )?.textContent?.trim() || '';
-    const location =
-      inner.querySelector(
-        '.job-card-container__metadata-wrapper li, [class*="metadata-wrapper"] li'
-      )?.textContent?.trim() || '';
-    return { id, title, link, company, location };
-  }
+  // --------- API call on click (skip Applied/Saved; allow Viewed) ----------
+  const sentForThisSession = new Set(); // per job id
+  let lastClickedLi = null;             // remember which card was clicked last
 
-  function findActiveCard() {
-    const activeContainer = document.querySelector(
-      '.jobs-search-results-list__list-item--active, [aria-current="page"]'
-    );
-    if (!activeContainer) return null;
-    return getCardLI(activeContainer) || activeContainer.closest?.(CARD_SEL) || null;
-  }
-
-  function tryInjectUserContent(payloadObj, text) {
-    // Replace the "content" of the "role": "user" message with job description
-    if (!payloadObj || typeof payloadObj !== 'object') return false;
-
-    if (Array.isArray(payloadObj.messages)) {
-      const msg = payloadObj.messages.find(m => m && m.role === 'user');
-      if (msg) { msg.content = text; return true; }
-    }
-
-    if (payloadObj.message && payloadObj.message.role === 'user') {
-      payloadObj.message.content = text; return true;
-    }
-
-    if ('content' in payloadObj) {
-      payloadObj.content = text; return true;
-    }
-
-    return false;
-  }
-
-  function parseJSONFromString(maybeJson) {
-    if (typeof maybeJson !== 'string') return null;
-    try {
-      return JSON.parse(maybeJson);
-    } catch {
-      const first = maybeJson.indexOf('{');
-      const last = maybeJson.lastIndexOf('}');
-      if (first >= 0 && last > first) {
-        try { return JSON.parse(maybeJson.slice(first, last + 1)); } catch {}
-      }
-      return null;
-    }
-  }
-
-  async function sendDetailsForActive() {
+  async function maybeSendFor(li) {
+    if (!li) return;
     if (!SETTINGS.apiUrl || !/^https?:\/\//i.test(SETTINGS.apiUrl)) return;
 
-    const li = findActiveCard();
-    if (!li) return;
+    const id = getJobId(li);
+    if (!id) return;
 
-    const { applied, saved } = vasState(li);
-    // Skip if Applied or Saved; send even if Viewed
-    if (applied || saved) return;
-
-    const base = extractBasicFromCard(li);
-    if (!base.id) return;
-
-    if (lastSentId === base.id || inFlightById.get(base.id)) return;
-
-    const details = extractRightPaneHtml();
-    const descriptionText = details.text || details.html || '';
-    if (!descriptionText) return;
-
-    // Build request body from user-provided JSON template
-    let bodyObj = null;
-    try {
-      bodyObj = JSON.parse(SETTINGS.requestPayload || '{}');
-    } catch {
+    const { applied, saved } = getJobState(li);
+    if (applied || saved) {
+      console.log('[LVH] Skipping send (Applied/Saved):', id);
       return;
     }
-    const injected = tryInjectUserContent(bodyObj, descriptionText);
-    if (!injected) return;
 
-    // ---- LOG REQUEST BODY ----
-    console.log('[LVH] Request body:', bodyObj);
+    // dedupe per job id in this session
+    if (sentForThisSession.has(id)) {
+      // still color with stored verdict (if any)
+      repaintCard(li);
+      return;
+    }
 
-    inFlightById.set(base.id, true);
+    const description = getRightPaneDescription();
+    if (!description) {
+      // details not yet rendered; try again shortly
+      scheduleSend(li, 400);
+      return;
+    }
+
+    // Build request payload from template or default
+    let requestBody;
+    try {
+      if (SETTINGS.requestPayload) {
+        const tpl = JSON.parse(SETTINGS.requestPayload);
+        if (Array.isArray(tpl.messages)) {
+          const idx = tpl.messages.findIndex(m => m && m.role === 'user');
+          if (idx >= 0) tpl.messages[idx] = { ...tpl.messages[idx], content: description };
+        }
+        requestBody = tpl;
+      }
+    } catch { /* ignore template parse errors */ }
+    if (!requestBody) requestBody = { message: { role: 'user', content: description } };
+
+    // Log request body before sending
+    try {
+      console.log('[LVH] Request body:', JSON.stringify(requestBody, null, 2));
+    } catch {
+      console.log('[LVH] Request body (object):', requestBody);
+    }
 
     try {
-      const res = await fetch(SETTINGS.apiUrl, {
+      const resp = await fetch(SETTINGS.apiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(SETTINGS.apiKey ? { Authorization: `Bearer ${SETTINGS.apiKey}` } : {})
+          ...(SETTINGS.apiKey ? { 'Authorization': `Bearer ${SETTINGS.apiKey}` } : {})
         },
-        body: JSON.stringify(bodyObj)
+        body: JSON.stringify(requestBody)
       });
 
-      // Read full response text so we can log it verbatim
-      const respText = await res.text();
-      // ---- LOG RESPONSE BODY ----
-      console.log('[LVH] Response body (text):', respText);
+      const text = await resp.text();
+      console.log('[LVH] Response body (text):', text);
 
-      // Try to parse JSON from it (if any)
-      let json = null;
-      try { json = JSON.parse(respText); } catch {}
+      // Parse envelope -> choices[0].message.content -> JSON string with { suitable: boolean }
+      let verdictBool;
+      try {
+        const outer = JSON.parse(text);
+        const contentStr =
+          outer?.choices?.[0]?.message?.content ??
+          outer?.message?.content ?? null;
 
-      const contentStr = json?.message?.content;
-      const parsed = parseJSONFromString(contentStr);
-      if (parsed && typeof parsed.suitable === 'boolean') {
-        VERDICT_CACHE[base.id] = parsed.suitable;
-        scheduleVerdictPersist();
-        paintTitle(li);
+        if (typeof contentStr === 'string') {
+          const inner = JSON.parse(contentStr);
+          if (typeof inner?.suitable === 'boolean') verdictBool = inner.suitable;
+        }
+      } catch { /* ignore parse errors */ }
+
+      if (typeof verdictBool === 'boolean') {
+        VERDICTS[id] = verdictBool;
+        saveVerdicts();
+        repaintCard(li);
       }
 
-      lastSentId = base.id;
+      sentForThisSession.add(id);
     } catch (e) {
-      console.warn('[LVH] Send error:', e);
-    } finally {
-      inFlightById.delete(base.id);
+      console.log('[LVH] Request failed:', e);
     }
   }
 
-  // ----------------- Observers & event hooks -----------------
-  const listObserver = new MutationObserver((muts) => {
+  // Debounced sender; tie to specific LI
+  let clickTimer = null;
+  function scheduleSend(li, delay = 500) {
+    if (clickTimer) clearTimeout(clickTimer);
+    clickTimer = setTimeout(() => {
+      clickTimer = null;
+      maybeSendFor(li || lastClickedLi);
+    }, delay);
+  }
+
+  // --------- Wiring: click → send using clicked LI ----------
+  document.addEventListener('click', (e) => {
+    const li = getCardLI(e.target);
+    if (li) {
+      lastClickedLi = li;
+      scheduleSend(li, 500);
+    }
+  }, true);
+
+  // Also, when the right pane updates after a click, try again using last clicked LI
+  const mo = new MutationObserver((muts) => {
     let needsScan = false;
+    let rightPaneChanged = false;
     for (const m of muts) {
-      for (const n of m.addedNodes) {
-        if (!(n instanceof Element)) continue;
-        if (
-          n.matches?.(CARD_SEL) ||
-          n.querySelector?.(CARD_SEL) ||
-          n.matches?.(FOOTER_SEL) ||
-          n.querySelector?.(FOOTER_SEL)
-        ) {
-          needsScan = true;
-          break;
+      if (m.type === 'childList') {
+        for (const n of m.addedNodes) {
+          if (!(n instanceof Element)) continue;
+          if (n.matches?.(CARD_SEL) || n.querySelector?.(CARD_SEL)) needsScan = true;
+          if (n.matches?.(RIGHT_PANE_HTML_SEL) || n.querySelector?.(RIGHT_PANE_HTML_SEL)) rightPaneChanged = true;
         }
       }
-      if (needsScan) break;
+      if (m.type === 'attributes' && m.target instanceof Element) {
+        if (m.target.matches?.(CARD_SEL) || m.target.closest?.(CARD_SEL)) needsScan = true;
+      }
     }
     if (needsScan) scan();
+    if (rightPaneChanged && lastClickedLi) scheduleSend(lastClickedLi, 300);
+  });
+  mo.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class', 'aria-current']
   });
 
-  const detailsObserver = new MutationObserver(() => {
-    if (detailsObserver._timer) clearTimeout(detailsObserver._timer);
-    detailsObserver._timer = setTimeout(() => {
-      detailsObserver._timer = null;
-      sendDetailsForActive();
-    }, 150);
-  });
-
-  function attachObservers() {
-    listObserver.observe(document.documentElement, { childList: true, subtree: true });
-
-    const detailsRoot =
-      document.querySelector(DETAILS_ROOT_SEL) ||
-      document.querySelector('.jobs-description');
-    if (detailsRoot) {
-      detailsObserver.observe(detailsRoot, { childList: true, subtree: true });
-    } else {
-      detailsObserver.observe(document.documentElement, { childList: true, subtree: true });
-    }
-  }
-
-  ['pushState', 'replaceState'].forEach((fn) => {
+  // SPA navigations -> repaint
+  ['pushState', 'replaceState'].forEach(fn => {
     const orig = history[fn];
     history[fn] = function (...args) {
       const r = orig.apply(this, args);
-      setTimeout(() => {
-        scan();
-        sendDetailsForActive();
-      }, 200);
+      setTimeout(() => scan(), 300);
       return r;
     };
   });
-  window.addEventListener('popstate', () => {
-    setTimeout(() => {
-      scan();
-      sendDetailsForActive();
-    }, 200);
-  });
+  window.addEventListener('popstate', () => setTimeout(() => scan(), 300));
 
-  document.addEventListener(
-    'click',
-    (e) => {
-      const li = getCardLI(e.target);
-      if (!li) return;
-      setTimeout(sendDetailsForActive, 250);
-    },
-    true
-  );
-
-  // ----------------- Init -----------------
+  // Initial paint
   scan();
-  attachObservers();
-  const repaintId = setInterval(scan, 3000);
-
-  window.addEventListener('beforeunload', () => {
-    try { listObserver.disconnect(); } catch {}
-    try { detailsObserver.disconnect(); } catch {}
-    try { clearInterval(repaintId); } catch {}
-  });
 })();
