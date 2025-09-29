@@ -1,4 +1,4 @@
-// === Linkedin Job Helper: VAS highlighter + send clicked job details ===
+// === Linkedin Job Helper: VAS highlighter (title in red) + send clicked job details ===
 (() => {
   if (window.__LVH_RUNNING__) return;
   window.__LVH_RUNNING__ = true;
@@ -13,7 +13,7 @@
   const INNER_CARD_SEL = '.job-card-container';
 
   const DETAILS_WRAP_SEL = '.job-details-module, .jobs-description.job-details-module';
-  const DETAILS_MAIN_SEL = '#job-details'; // inner content container (often present)
+  const DETAILS_MAIN_SEL = '#job-details';
 
   // --------- Settings (API) ---------
   let SETTINGS = { apiUrl: "", apiKey: "" };
@@ -28,13 +28,13 @@
     });
   } catch { /* non-extension context */ }
 
-  // --------- Styles (inset red border) ---------
+  // --------- Styles (title red; no border) ---------
   (function ensureStyle() {
     if (document.getElementById("lvh-style")) return;
     const style = document.createElement("style");
     style.id = "lvh-style";
     style.textContent = `
-      /* Always show cards we touch */
+      /* Always show cards we touch (defensive) */
       li[data-occludable-job-id].lvh-force-show,
       li.scaffold-layout__list-item.lvh-force-show,
       li.occludable-update.lvh-force-show {
@@ -42,16 +42,9 @@
         visibility: visible !important;
         opacity: 1 !important;
       }
-      /* Inset border that doesn't get clipped by overflow and sits inside */
-      .lvh-flagged-card { position: relative !important; }
-      .lvh-flagged-card::after {
-        content: "";
-        position: absolute;
-        inset: 10px;              /* adjust for more/less padding inside */
-        border: 2px solid red;
-        border-radius: 14px;
-        pointer-events: none;
-        box-sizing: border-box;
+      /* Make the job title text red (and its descendants) */
+      .lvh-title-red, .lvh-title-red * {
+        color: #d32f2f !important;
       }
     `;
     document.head.appendChild(style);
@@ -60,6 +53,10 @@
   // --------- Helpers ---------
   const getCardLI = (el) => el?.closest?.(CARD_SEL) || null;
   const getInnerCard = (li) => li.querySelector(INNER_CARD_SEL) || li;
+  const getTitleEl = (li) => {
+    const inner = getInnerCard(li);
+    return inner.querySelector('a.job-card-container__link, a[href*="/jobs/view/"]');
+  };
 
   function getJobState(li) {
     const footerItems = li.querySelectorAll(FOOTER_SEL);
@@ -80,18 +77,25 @@
 
   function applyHighlight(li) {
     const state = getJobState(li);
-    const isVAS = !!state;
-    const inner = getInnerCard(li);
+    li.__lvh_state = state; // remember state
 
-    if (isVAS) {
+    const titleEl = getTitleEl(li);
+
+    if (state) {
+      // keep visible
       if (!li.classList.contains("lvh-force-show")) li.classList.add("lvh-force-show");
       cleanseHiding(li);
-      if (!inner.classList.contains("lvh-flagged-card")) inner.classList.add("lvh-flagged-card");
+
+      // title in red
+      if (titleEl && !titleEl.classList.contains("lvh-title-red")) {
+        titleEl.classList.add("lvh-title-red");
+      }
     } else {
-      if (li.classList.contains("lvh-force-show")) li.classList.remove("lvh-force-show");
-      if (inner.classList.contains("lvh-flagged-card")) inner.classList.remove("lvh-flagged-card");
+      // remove red if not VAS
+      if (titleEl && titleEl.classList.contains("lvh-title-red")) {
+        titleEl.classList.remove("lvh-title-red");
+      }
     }
-    li.__lvh_state = state; // remember "Viewed" | "Applied" | "Saved" | null
   }
 
   function extractBasicFromLI(li) {
@@ -102,7 +106,7 @@
         li.getAttribute("data-occludable-job-id") ||
         "";
 
-      const titleA = inner.querySelector('a.job-card-container__link, a[href*="/jobs/view/"]');
+      const titleA = getTitleEl(li);
       const title = titleA?.textContent?.trim() || "";
       const link = titleA?.href || "";
 
@@ -121,11 +125,10 @@
   // --------- Right-pane detail capture ---------
   function waitForDetails(timeoutMs = 5000) {
     const start = Date.now();
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       function check() {
         const wrap = document.querySelector(DETAILS_WRAP_SEL);
         if (wrap) {
-          // prefer the main content, but fall back to whole module’s innerHTML
           const main = wrap.querySelector(DETAILS_MAIN_SEL);
           const html = (main || wrap).innerHTML || "";
           const text = (main || wrap).innerText || "";
@@ -135,7 +138,7 @@
           }
         }
         if (Date.now() - start > timeoutMs) {
-          resolve({ html: "", text: "" }); // resolve empty (don’t block)
+          resolve({ html: "", text: "" });
           return;
         }
         requestAnimationFrame(check);
@@ -164,9 +167,7 @@
         },
         body: JSON.stringify(payload)
       });
-    } catch {
-      // swallow; a later click can resend
-    }
+    } catch { /* swallow */ }
   }
 
   async function captureAndSendFor(li) {
@@ -180,10 +181,8 @@
     if (!id) return;
     if (!shouldSend()) return;
 
-    // de-dup: if in-flight or already sent, skip
     if (capturePending.has(id) || sentDetailJobs.has(id)) return;
 
-    // short cooldown to avoid multiple fires on same selection
     const now = Date.now();
     if (lastSend.id === id && now - lastSend.ts < DEDUP_COOLDOWN_MS) return;
     lastSend = { id, ts: now };
@@ -192,7 +191,6 @@
     const details = await waitForDetails(6000);
     capturePending.delete(id);
 
-    // if another send already succeeded during wait, skip
     if (sentDetailJobs.has(id)) return;
 
     const payload = {
@@ -230,7 +228,7 @@
     scan();
   })();
 
-  // Observe DOM additions (no attribute watch to prevent loops)
+  // Observe DOM additions
   const mo = new MutationObserver((muts) => {
     for (const m of muts) {
       for (const n of m.addedNodes) {
@@ -269,9 +267,8 @@
   document.addEventListener('click', (ev) => {
     const li = getCardLI(ev.target);
     if (!li) return;
-    // give LinkedIn a tick to load the right pane, then capture
     setTimeout(() => captureAndSendFor(li), 50);
-  }, true); // capture phase to catch early
+  }, true);
 
   // Cleanup on unload
   window.addEventListener('beforeunload', () => {
