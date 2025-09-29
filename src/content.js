@@ -1,278 +1,356 @@
-// === Linkedin Job Helper: VAS highlighter (title in red) + send clicked job details ===
+// === Linkedin Job Helper: title coloring (VAS fallback) + click-to-send details + sticky verdicts ===
 (() => {
   if (window.__LVH_RUNNING__) return;
   window.__LVH_RUNNING__ = true;
 
-  // --------- Config / Selectors ---------
-  const STATE_RE = /\b(Viewed|Applied|Saved)\b/i;
-
+  // ----------------- Constants & selectors -----------------
+  const STATE_RE = /\b(Viewed|Applied|Saved)\b/i; // detect V/A/S in footer text
   const CARD_SEL =
     'li[data-occludable-job-id], li.scaffold-layout__list-item, li.occludable-update';
   const FOOTER_SEL =
     '.job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state';
   const INNER_CARD_SEL = '.job-card-container';
+  const TITLE_SEL = 'a.job-card-container__link, a[href*="/jobs/view/"]';
 
-  const DETAILS_WRAP_SEL = '.job-details-module, .jobs-description.job-details-module';
-  const DETAILS_MAIN_SEL = '#job-details';
+  // Job details pane (right side) container; LinkedIn classes are quite stable around these:
+  const DETAILS_ROOT_SEL =
+    '.jobs-description.job-details-module, .jobs-box--full-width.job-details-module';
+  const DETAILS_HTML_SEL = '#job-details, .jobs-description__content';
 
-  // --------- Settings (API) ---------
-  let SETTINGS = { apiUrl: "", apiKey: "" };
-  try {
-    chrome.storage.sync.get(["apiUrl", "apiKey"]).then(v => {
-      SETTINGS = { apiUrl: v.apiUrl || "", apiKey: v.apiKey || "" };
-    });
-    chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== "sync") return;
-      if (changes.apiUrl) SETTINGS.apiUrl = changes.apiUrl.newValue || "";
-      if (changes.apiKey) SETTINGS.apiKey = changes.apiKey.newValue || "";
-    });
-  } catch { /* non-extension context */ }
+  // ----------------- User-configured settings -----------------
+  // In Options page, user sets:
+  //  - apiUrl       : endpoint that accepts POST of job details and returns { suitable: true/false }
+  //  - apiKey       : optional Bearer token
+  let SETTINGS = { apiUrl: '', apiKey: '' };
+  chrome.storage.sync.get(['apiUrl', 'apiKey']).then((v) => {
+    SETTINGS = { apiUrl: v.apiUrl || '', apiKey: v.apiKey || '' };
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'sync') return;
+    if (changes.apiUrl) SETTINGS.apiUrl = changes.apiUrl.newValue || '';
+    if (changes.apiKey) SETTINGS.apiKey = changes.apiKey.newValue || '';
+  });
 
-  // --------- Styles (title red; no border) ---------
+  // ----------------- Styles (title coloring) -----------------
   (function ensureStyle() {
-    if (document.getElementById("lvh-style")) return;
-    const style = document.createElement("style");
-    style.id = "lvh-style";
+    if (document.getElementById('lvh-style')) return;
+    const style = document.createElement('style');
+    style.id = 'lvh-style';
     style.textContent = `
-      /* Always show cards we touch (defensive) */
-      li[data-occludable-job-id].lvh-force-show,
-      li.scaffold-layout__list-item.lvh-force-show,
-      li.occludable-update.lvh-force-show {
-        display: block !important;
-        visibility: visible !important;
-        opacity: 1 !important;
-      }
-      /* Make the job title text red (and its descendants) */
-      .lvh-title-red, .lvh-title-red * {
-        color: #d32f2f !important;
-      }
+      .lvh-title-red   { color: #d32f2f !important; }
+      .lvh-title-green { color: #2e7d32 !important; }
     `;
     document.head.appendChild(style);
   })();
 
-  // --------- Helpers ---------
-  const getCardLI = (el) => el?.closest?.(CARD_SEL) || null;
-  const getInnerCard = (li) => li.querySelector(INNER_CARD_SEL) || li;
-  const getTitleEl = (li) => {
-    const inner = getInnerCard(li);
-    return inner.querySelector('a.job-card-container__link, a[href*="/jobs/view/"]');
-  };
+  // ----------------- Verdict cache (sticky across refresh) -----------------
+  // We persist a small { [jobId]: true|false } map in chrome.storage.local
+  let VERDICT_CACHE = Object.create(null);
+  let verdictWriteTimer = null;
 
-  function getJobState(li) {
-    const footerItems = li.querySelectorAll(FOOTER_SEL);
-    for (const f of footerItems) {
-      const txt = (f.textContent || "").trim();
-      const m = txt.match(STATE_RE);
-      if (m) return m[1]; // "Viewed" | "Applied" | "Saved"
+  chrome.storage.local.get(['lvh_verdicts']).then((v) => {
+    if (v && v.lvh_verdicts && typeof v.lvh_verdicts === 'object') {
+      VERDICT_CACHE = { ...v.lvh_verdicts };
+      // Paint what's in the DOM now using cached verdicts
+      scan();
     }
-    return null;
+  });
+
+  function scheduleVerdictPersist() {
+    if (verdictWriteTimer) return;
+    verdictWriteTimer = setTimeout(() => {
+      verdictWriteTimer = null;
+      chrome.storage.local.set({ lvh_verdicts: VERDICT_CACHE }).catch(() => {});
+    }, 500);
   }
 
-  function cleanseHiding(li) {
-    if (li.hasAttribute("hidden")) li.removeAttribute("hidden");
-    li.style.removeProperty?.("display");
-    li.style.removeProperty?.("visibility");
-    li.style.removeProperty?.("opacity");
+  // ----------------- Helpers -----------------
+  const getCardLI = (el) => el.closest?.(CARD_SEL) || null;
+  const getInnerCard = (li) => li.querySelector(INNER_CARD_SEL) || li;
+  const getTitleEl = (li) => getInnerCard(li).querySelector(TITLE_SEL);
+
+  function getJobId(el) {
+    const li = getCardLI(el) || el.closest?.(CARD_SEL) || el;
+    const inner = li?.querySelector?.(INNER_CARD_SEL) || li;
+    return (
+      inner?.getAttribute?.('data-job-id') ||
+      li?.getAttribute?.('data-occludable-job-id') ||
+      ''
+    );
   }
 
-  function applyHighlight(li) {
-    const state = getJobState(li);
-    li.__lvh_state = state; // remember state
+  function vasState(li) {
+    // Look at footer items for View/Applied/Saved
+    const footerItems = li.querySelectorAll(FOOTER_SEL);
+    let viewed = false,
+      applied = false,
+      saved = false;
+    for (const f of footerItems) {
+      const txt = (f.textContent || '').trim();
+      if (/Viewed/i.test(txt)) viewed = true;
+      if (/Applied/i.test(txt)) applied = true;
+      if (/Saved/i.test(txt)) saved = true;
+    }
+    return { viewed, applied, saved };
+  }
+
+  function paintTitle(li) {
+    const id = getJobId(li);
+    if (!id) return;
 
     const titleEl = getTitleEl(li);
+    if (!titleEl) return;
 
-    if (state) {
-      // keep visible
-      if (!li.classList.contains("lvh-force-show")) li.classList.add("lvh-force-show");
-      cleanseHiding(li);
+    titleEl.classList.remove('lvh-title-red', 'lvh-title-green');
 
-      // title in red
-      if (titleEl && !titleEl.classList.contains("lvh-title-red")) {
-        titleEl.classList.add("lvh-title-red");
+    const verdictKnown = Object.prototype.hasOwnProperty.call(VERDICT_CACHE, id);
+    const verdict = VERDICT_CACHE[id];
+
+    if (verdictKnown) {
+      if (verdict === true) {
+        titleEl.classList.add('lvh-title-green');
+      } else if (verdict === false) {
+        titleEl.classList.add('lvh-title-red');
       }
     } else {
-      // remove red if not VAS
-      if (titleEl && titleEl.classList.contains("lvh-title-red")) {
-        titleEl.classList.remove("lvh-title-red");
+      // No verdict yet → fallback to VAS coloring (any of V/A/S = red)
+      const { viewed, applied, saved } = vasState(li);
+      if (viewed || applied || saved) {
+        titleEl.classList.add('lvh-title-red');
       }
     }
   }
 
-  function extractBasicFromLI(li) {
-    try {
-      const inner = getInnerCard(li);
-      const id =
-        inner.getAttribute("data-job-id") ||
-        li.getAttribute("data-occludable-job-id") ||
-        "";
-
-      const titleA = getTitleEl(li);
-      const title = titleA?.textContent?.trim() || "";
-      const link = titleA?.href || "";
-
-      const company = inner.querySelector('.artdeco-entity-lockup__subtitle, [class*="entity-lockup__subtitle"]')?.textContent?.trim() || "";
-      const location = inner.querySelector('.job-card-container__metadata-wrapper li, [class*="metadata-wrapper"] li')?.textContent?.trim() || "";
-
-      const posted = inner.querySelector('time')?.getAttribute('datetime') ||
-                     inner.querySelector('time')?.textContent?.trim() || "";
-
-      return { id, title, company, location, link, postedAt: posted };
-    } catch {
-      return { id: "" };
-    }
-  }
-
-  // --------- Right-pane detail capture ---------
-  function waitForDetails(timeoutMs = 5000) {
-    const start = Date.now();
-    return new Promise((resolve) => {
-      function check() {
-        const wrap = document.querySelector(DETAILS_WRAP_SEL);
-        if (wrap) {
-          const main = wrap.querySelector(DETAILS_MAIN_SEL);
-          const html = (main || wrap).innerHTML || "";
-          const text = (main || wrap).innerText || "";
-          if (html.trim().length > 0 || text.trim().length > 0) {
-            resolve({ html, text });
-            return;
-          }
-        }
-        if (Date.now() - start > timeoutMs) {
-          resolve({ html: "", text: "" });
-          return;
-        }
-        requestAnimationFrame(check);
-      }
-      check();
+  function scan(root = document) {
+    const cards = root.querySelectorAll(CARD_SEL);
+    cards.forEach((li) => {
+      paintTitle(li);
     });
   }
 
-  // --------- Sending (clicked job only; allow Viewed, skip Applied/Saved) ---------
-  const sentDetailJobs = new Set();
-  const capturePending = new Set();
-  let lastSend = { id: null, ts: 0 };
-  const DEDUP_COOLDOWN_MS = 3500;
+  // ----------------- Details capture & send (on click) -----------------
+  // Rule per user: send details for clicked jobs EXCEPT when Applied or Saved (Viewed is allowed).
+  let inFlightById = new Map(); // jobId -> true while sending
+  let lastSentId = null;
 
-  function shouldSend() {
-    return SETTINGS.apiUrl && /^https?:\/\//i.test(SETTINGS.apiUrl);
+  // When a card is clicked, LinkedIn marks it active and loads/updates the details pane.
+  // We'll observe the details pane and when it has content, send it once per jobId.
+  function extractRightPaneHtml() {
+    const root =
+      document.querySelector(DETAILS_ROOT_SEL) ||
+      document.querySelector('.jobs-description');
+    if (!root) return { html: '', text: '' };
+
+    const target =
+      root.querySelector(DETAILS_HTML_SEL) ||
+      root.querySelector('.jobs-description__content') ||
+      root;
+
+    // Grab full innerHTML for fidelity, plus a text alternative
+    const html = target?.innerHTML?.trim() || '';
+    const text = target?.innerText?.trim() || '';
+    return { html, text };
   }
 
-  async function sendDetails(payload) {
+  function extractBasicFromCard(li) {
+    const inner = getInnerCard(li);
+    const id =
+      inner.getAttribute('data-job-id') ||
+      li.getAttribute('data-occludable-job-id') ||
+      '';
+    const titleA = inner.querySelector(TITLE_SEL);
+    const title = titleA?.textContent?.trim() || '';
+    const link = titleA?.href || '';
+    const company =
+      inner.querySelector(
+        '.artdeco-entity-lockup__subtitle, [class*="entity-lockup__subtitle"]'
+      )?.textContent?.trim() || '';
+    const location =
+      inner.querySelector(
+        '.job-card-container__metadata-wrapper li, [class*="metadata-wrapper"] li'
+      )?.textContent?.trim() || '';
+    return { id, title, link, company, location };
+  }
+
+  function findActiveCard() {
+    // Active marker lives on container inside the LI
+    const activeContainer = document.querySelector(
+      '.jobs-search-results-list__list-item--active, [aria-current="page"]'
+    );
+    if (!activeContainer) return null;
+    return getCardLI(activeContainer) || activeContainer.closest?.(CARD_SEL) || null;
+  }
+
+  async function sendDetailsForActive() {
+    if (!SETTINGS.apiUrl || !/^https?:\/\//i.test(SETTINGS.apiUrl)) return;
+
+    const li = findActiveCard();
+    if (!li) return;
+
+    const { applied, saved } = vasState(li);
+    // Skip if Applied or Saved; send even if Viewed
+    if (applied || saved) return;
+
+    const base = extractBasicFromCard(li);
+    if (!base.id) return;
+
+    // De-dupe: avoid re-sending same job while details are visible
+    if (lastSentId === base.id || inFlightById.get(base.id)) return;
+
+    const details = extractRightPaneHtml();
+    if (!details.html && !details.text) {
+      // No content yet; will be retried by observer updates
+      return;
+    }
+
+    inFlightById.set(base.id, true);
+
     try {
-      await fetch(SETTINGS.apiUrl, {
-        method: "POST",
+      const payload = {
+        id: base.id,
+        title: base.title,
+        company: base.company,
+        location: base.location,
+        link: base.link,
+        detailsHtml: details.html,
+        detailsText: details.text
+      };
+
+      const res = await fetch(SETTINGS.apiUrl, {
+        method: 'POST',
         headers: {
-          "Content-Type": "application/json",
-          ...(SETTINGS.apiKey ? { "Authorization": `Bearer ${SETTINGS.apiKey}` } : {})
+          'Content-Type': 'application/json',
+          ...(SETTINGS.apiKey ? { Authorization: `Bearer ${SETTINGS.apiKey}` } : {})
         },
         body: JSON.stringify(payload)
       });
-    } catch { /* swallow */ }
-  }
 
-  async function captureAndSendFor(li) {
-    if (!li) return;
-
-    // Skip only for Applied or Saved; allow Viewed or no state
-    if (li.__lvh_state === "Applied" || li.__lvh_state === "Saved") return;
-
-    const basic = extractBasicFromLI(li);
-    const id = basic.id;
-    if (!id) return;
-    if (!shouldSend()) return;
-
-    if (capturePending.has(id) || sentDetailJobs.has(id)) return;
-
-    const now = Date.now();
-    if (lastSend.id === id && now - lastSend.ts < DEDUP_COOLDOWN_MS) return;
-    lastSend = { id, ts: now };
-
-    capturePending.add(id);
-    const details = await waitForDetails(6000);
-    capturePending.delete(id);
-
-    if (sentDetailJobs.has(id)) return;
-
-    const payload = {
-      job: {
-        ...basic,
-        state: li.__lvh_state || null,
-        detailsHtml: details.html,
-        detailsText: details.text
+      // Expecting { suitable: true|false } optionally
+      let verdictResp = null;
+      try {
+        verdictResp = await res.json();
+      } catch (_) {
+        verdictResp = null;
       }
-    };
 
-    await sendDetails(payload);
-    sentDetailJobs.add(id);
+      if (verdictResp && typeof verdictResp.suitable === 'boolean') {
+        VERDICT_CACHE[base.id] = verdictResp.suitable;
+        scheduleVerdictPersist();
+        // Paint immediately
+        paintTitle(li);
+      }
+
+      lastSentId = base.id;
+    } catch (_) {
+      // Silent fail; allow future retries when DOM changes
+    } finally {
+      inFlightById.delete(base.id);
+    }
   }
 
-  // --------- Scanning & Observers ---------
-  function scan(root = document) {
-    const cards = root.querySelectorAll(CARD_SEL);
-    cards.forEach(li => applyHighlight(li));
-  }
-
-  let scanPending = false;
-  function scheduleScan(target) {
-    if (scanPending) return;
-    scanPending = true;
-    setTimeout(() => {
-      scanPending = false;
-      scan(target || document);
-    }, 120);
-  }
-
-  // Initial pass
-  (function initial() {
-    document.querySelectorAll(CARD_SEL).forEach((li) => cleanseHiding(li));
-    scan();
-  })();
-
-  // Observe DOM additions
-  const mo = new MutationObserver((muts) => {
+  // ----------------- Observers & event hooks -----------------
+  // 1) Observe list area to paint titles (and repaint when VAS footer appears)
+  const listObserver = new MutationObserver((muts) => {
+    let needsScan = false;
     for (const m of muts) {
       for (const n of m.addedNodes) {
         if (!(n instanceof Element)) continue;
         if (
           n.matches?.(CARD_SEL) ||
           n.querySelector?.(CARD_SEL) ||
-          n.matches?.('.job-card-container') ||
-          n.querySelector?.('.job-card-container') ||
           n.matches?.(FOOTER_SEL) ||
           n.querySelector?.(FOOTER_SEL)
         ) {
-          scheduleScan();
-          return;
+          needsScan = true;
+          break;
         }
       }
+      if (needsScan) break;
     }
+    if (needsScan) scan();
   });
-  mo.observe(document.documentElement, { childList: true, subtree: true });
 
-  // SPA route changes
-  ['pushState', 'replaceState'].forEach(fn => {
+  // 2) Observe details pane to know when content is loaded/changed after a click
+  const detailsObserver = new MutationObserver(() => {
+    // Debounce a tiny bit to let LinkedIn finish DOM updates
+    if (detailsObserver._timer) clearTimeout(detailsObserver._timer);
+    detailsObserver._timer = setTimeout(() => {
+      detailsObserver._timer = null;
+      sendDetailsForActive();
+    }, 150);
+  });
+
+  function attachObservers() {
+    listObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true
+    });
+
+    // Attach a dedicated observer to the details root if present
+    const detailsRoot =
+      document.querySelector(DETAILS_ROOT_SEL) ||
+      document.querySelector('.jobs-description');
+    if (detailsRoot) {
+      detailsObserver.observe(detailsRoot, {
+        childList: true,
+        subtree: true
+      });
+    } else {
+      // Fallback: observe the whole doc; sendDetailsForActive will guard
+      detailsObserver.observe(document.documentElement, {
+        childList: true,
+        subtree: true
+      });
+    }
+  }
+
+  // Intercept SPA navigations to repaint & rewire observers
+  ['pushState', 'replaceState'].forEach((fn) => {
     const orig = history[fn];
     history[fn] = function (...args) {
       const r = orig.apply(this, args);
-      scheduleScan();
+      setTimeout(() => {
+        scan();
+        sendDetailsForActive();
+      }, 200);
       return r;
     };
   });
-  window.addEventListener('popstate', () => scheduleScan());
+  window.addEventListener('popstate', () => {
+    setTimeout(() => {
+      scan();
+      sendDetailsForActive();
+    }, 200);
+  });
 
-  // Lightweight periodic rescan
-  const intervalId = setInterval(() => scan(), 3000);
+  // Click handler: when the user clicks a job card, attempt a send after the pane updates
+  document.addEventListener(
+    'click',
+    (e) => {
+      const li = getCardLI(e.target);
+      if (!li) return;
+      // Wait a bit for LinkedIn to update the details pane, then try to send
+      setTimeout(sendDetailsForActive, 250);
+    },
+    true
+  );
 
-  // Click handler: capture for the clicked LI
-  document.addEventListener('click', (ev) => {
-    const li = getCardLI(ev.target);
-    if (!li) return;
-    setTimeout(() => captureAndSendFor(li), 50);
-  }, true);
+  // ----------------- Init -----------------
+  scan();
+  attachObservers();
 
-  // Cleanup on unload
+  // Periodic light repaint to catch any missed cards
+  const repaintId = setInterval(scan, 3000);
+
   window.addEventListener('beforeunload', () => {
-    try { mo.disconnect(); } catch {}
-    try { clearInterval(intervalId); } catch {}
+    try {
+      listObserver.disconnect();
+    } catch {}
+    try {
+      detailsObserver.disconnect();
+    } catch {}
+    try {
+      clearInterval(repaintId);
+    } catch {}
   });
 })();
