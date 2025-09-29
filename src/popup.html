@@ -2,16 +2,19 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Job Scraper</title>
+    <title>Linkedin Job Helper</title>
     <style>
-      body { font: 13px system-ui, sans-serif; margin: 10px; }
-      button { padding: 6px 10px; }
-      pre { white-space: pre-wrap; word-break: break-word; }
+      body { font: 13px system-ui, sans-serif; margin: 12px; width: 280px; }
+      button { padding: 8px 10px; width: 100%; }
+      .row { margin-top: 10px; }
+      .ok { color: #2e7d32; }
+      .err { color: #c62828; }
+      small { color:#666; }
     </style>
   </head>
   <body>
-    <button id="run">Run on this tab</button>
-    <pre id="out"></pre>
+    <button id="startAuto">Start Automation</button>
+    <div class="row" id="status"><small>Open a linkedin.com/jobs tab</small></div>
     <script src="popup.js"></script>
   </body>
 </html>

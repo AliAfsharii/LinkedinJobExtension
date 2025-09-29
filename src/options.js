@@ -10,7 +10,7 @@
     return JSON.stringify(
       {
         messages: [
-          { role: "system", content: "You are a job screener. Reply only with JSON { \"suitable\": true/false } in the assistant message content." },
+          { role: "system", content: "You are a job screener. Reply ONLY with a JSON object as a single line string in the assistant message content. Shape: {\"jobId\": string, \"suitable\": true|false }" },
           { role: "user", content: "(job description will be injected here)" }
         ]
       },
@@ -32,8 +32,8 @@
 
     // Light validation
     try { JSON.parse(requestPayload); }
-    catch (e) {
-      statusEl.textContent = "Invalid JSON in Request Payload.";
+    catch {
+      statusEl.textContent = "Payload must be valid JSON.";
       statusEl.style.color = "#d32f2f";
       return;
     }
