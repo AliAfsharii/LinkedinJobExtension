@@ -1,14 +1,24 @@
 {
   "manifest_version": 3,
-  "name": "LinkedIn: Hide Viewed Jobs",
-  "version": "1.0.1",
-  "description": "Hide jobs marked as 'Viewed' on LinkedIn job search.",
-  "icons": { "128": "icon128.png" },
+  "name": "Linkedin Job Helper",
+  "version": "1.5.0",
+  "description": "Highlights Viewed/Applied/Saved jobs and exports non-VAS jobs to your API.",
+  "icons": { "128": "icon.png" },
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.linkedin.com/*",
+    "https://*.linkedin.com/*",
+    "https://YOUR-API-HOST.example.com/*"
+  ],
   "content_scripts": [
     {
-      "matches": ["https://www.linkedin.com/jobs/search*"],
+      "matches": ["https://www.linkedin.com/jobs*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  }
 }
