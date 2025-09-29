@@ -1,117 +1,141 @@
-// Hide job list items whose footer shows "Viewed" or "Applied",
-// EXCEPT the currently selected/active card.
-const STATE_RE = /\b(Viewed|Applied|Saved)\b/i;
+// === LinkedIn VAS (Viewed/Applied/Saved) highlighter – never hide ===
+(() => {
+  if (window.__LVH_RUNNING__) return;
+  window.__LVH_RUNNING__ = true;
 
-// A job card <li>
-const CARD_SEL = 'li[data-occludable-job-id], li.scaffold-layout__list-item, li.occludable-update';
-// Footer bits that may contain the state text
-const FOOTER_SEL = '.job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state';
-// Active marker lives inside the card container when selected
-const ACTIVE_SEL = '.jobs-search-results-list__list-item--active, [aria-current="page"]';
+  const STATE_RE = /\b(Viewed|Applied|Saved)\b/i;
 
-function cardRoot(el) {
-  return el.closest(CARD_SEL);
-}
+  const CARD_SEL =
+    'li[data-occludable-job-id], li.scaffold-layout__list-item, li.occludable-update';
+  const FOOTER_SEL =
+    '.job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state';
+  const INNER_CARD_SEL = '.job-card-container';
 
-function isActive(li) {
-  return !!li.querySelector(ACTIVE_SEL);
-}
+  // ----- Styles -----
+  (function ensureStyle() {
+    if (document.getElementById('lvh-style')) return;
+    const style = document.createElement('style');
+    style.id = 'lvh-style';
+    style.textContent = `
+      /* Force show any card we mark, even if inline styles try to hide it */
+      li[data-occludable-job-id].lvh-force-show,
+      li.scaffold-layout__list-item.lvh-force-show,
+      li.occludable-update.lvh-force-show {
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+      }
 
-function hasHiddenState(li) {
-  const footerItems = li.querySelectorAll(FOOTER_SEL);
-  for (const f of footerItems) {
-    const txt = (f.textContent || '').trim();
-    if (STATE_RE.test(txt)) return true;
-  }
-  return false;
-}
+      /* Full, even border on all sides using outline (not clipped by overflow) */
+      .lvh-flagged-card {
+        outline: 2px solid red !important;
+        outline-offset: 0 !important;
+        border-radius: 8px !important;
+      }
+    `;
+    document.head.appendChild(style);
+  })();
 
-function applyVisibility(li) {
-  // Never hide the currently selected/active card
-  if (isActive(li)) {
-    li.style.display = '';
-    li.__lvh_hidden = false;
-    return;
-  }
-  if (hasHiddenState(li)) {
-    li.style.display = 'none';
-    li.__lvh_hidden = true;
-  } else {
-    li.style.display = '';
-    li.__lvh_hidden = false;
-  }
-}
+  // ----- Helpers -----
+  const getCardLI = (el) => el.closest?.(CARD_SEL) || null;
+  const getInnerCard = (li) => li.querySelector(INNER_CARD_SEL) || li;
 
-function scan(root = document) {
-  const cards = root.querySelectorAll(CARD_SEL);
-  cards.forEach(li => {
-    if (!li.__lvh_bound) {
-      li.__lvh_bound = true;
+  function hasFlagState(li) {
+    const footerItems = li.querySelectorAll(FOOTER_SEL);
+    for (const f of footerItems) {
+      const txt = (f.textContent || '').trim();
+      if (STATE_RE.test(txt)) return true;
     }
-    applyVisibility(li);
+    return false;
+  }
+
+  function cleanseHiding(li) {
+    // Remove common hiding mechanisms, but rely on CSS class to enforce visibility
+    if (li.hasAttribute('hidden')) li.removeAttribute('hidden');
+    li.style.removeProperty?.('display');
+    li.style.removeProperty?.('visibility');
+    li.style.removeProperty?.('opacity');
+  }
+
+  function applyHighlight(li) {
+    const flagged = hasFlagState(li);
+    const inner = getInnerCard(li);
+
+    if (flagged) {
+      // Make sure it's visible regardless of other scripts
+      if (!li.classList.contains('lvh-force-show')) li.classList.add('lvh-force-show');
+      cleanseHiding(li);
+
+      if (!inner.classList.contains('lvh-flagged-card')) {
+        inner.classList.add('lvh-flagged-card');
+      }
+    } else {
+      // Remove our markers if state disappears
+      if (li.classList.contains('lvh-force-show')) li.classList.remove('lvh-force-show');
+      if (inner.classList.contains('lvh-flagged-card')) inner.classList.remove('lvh-flagged-card');
+    }
+  }
+
+  function scan(root = document) {
+    const cards = root.querySelectorAll(CARD_SEL);
+    cards.forEach((li) => applyHighlight(li));
+  }
+
+  // Debounced rescans to avoid thrashing
+  let scanPending = false;
+  function scheduleScan(target) {
+    if (scanPending) return;
+    scanPending = true;
+    setTimeout(() => {
+      scanPending = false;
+      scan(target || document);
+    }, 120);
+  }
+
+  // Initial pass + unhide anything old scripts hid
+  (function initial() {
+    document.querySelectorAll(CARD_SEL).forEach((li) => cleanseHiding(li));
+    scan();
+  })();
+
+  // Observe DOM additions only (no attribute watching to avoid loops)
+  const mo = new MutationObserver((muts) => {
+    for (const m of muts) {
+      for (const n of m.addedNodes) {
+        if (!(n instanceof Element)) continue;
+        if (
+          n.matches?.(CARD_SEL) ||
+          n.querySelector?.(CARD_SEL) ||
+          n.matches?.('.job-card-container') ||
+          n.querySelector?.('.job-card-container') ||
+          n.matches?.(FOOTER_SEL) ||
+          n.querySelector?.(FOOTER_SEL)
+        ) {
+          scheduleScan();
+          return;
+        }
+      }
+    }
   });
-}
+  mo.observe(document.documentElement, { childList: true, subtree: true });
 
-// Initial pass
-scan();
+  // Re-scan on SPA route changes
+  ['pushState', 'replaceState'].forEach((fn) => {
+    const orig = history[fn];
+    history[fn] = function (...args) {
+      const r = orig.apply(this, args);
+      scheduleScan();
+      return r;
+    };
+  });
+  window.addEventListener('popstate', () => scheduleScan());
 
-// Observe dynamic loads & text changes
-const mo = new MutationObserver(muts => {
-  for (const m of muts) {
-    // Attribute changes (e.g., active class toggled)
-    if (m.type === 'attributes') {
-      const li = cardRoot(m.target);
-      if (li) applyVisibility(li);
-      continue;
-    }
+  // Periodic safety net (lightweight)
+  const intervalId = setInterval(() => scan(), 3000);
 
-    // New nodes
-    for (const n of m.addedNodes) {
-      if (!(n instanceof Element)) continue;
-
-      // If a footer item with "Viewed/Applied" appears, (re)apply on its card
-      if (n.matches?.(FOOTER_SEL) && STATE_RE.test((n.textContent || '').trim())) {
-        const li = cardRoot(n);
-        if (li) applyVisibility(li);
-        continue;
-      }
-
-      // If an active marker appears inside a card, (re)apply
-      if (n.matches?.(ACTIVE_SEL) || n.querySelector?.(ACTIVE_SEL)) {
-        const li = cardRoot(n) || n.closest?.(CARD_SEL);
-        if (li) applyVisibility(li);
-      }
-
-      // If subtree may contain cards, scan it
-      if (
-        n.matches?.(CARD_SEL) ||
-        n.querySelector?.(CARD_SEL) ||
-        n.matches?.('.job-card-container') ||
-        n.querySelector?.('.job-card-container')
-      ) {
-        scan(n);
-      }
-    }
-  }
-});
-mo.observe(document.documentElement, {
-  childList: true,
-  subtree: true,
-  attributes: true,
-  attributeFilter: ['class', 'aria-current']
-});
-
-// Re-scan on SPA route changes + periodic safety net
-['pushState', 'replaceState'].forEach(fn => {
-  const orig = history[fn];
-  history[fn] = function (...args) {
-    const r = orig.apply(this, args);
-    setTimeout(scan, 400);
-    return r;
-  };
-});
-window.addEventListener('popstate', () => setTimeout(scan, 400));
-setInterval(() => scan(), 3000);
-
-// Optional console helper
-// window.__lvh_force = () => scan();
+  // Cleanup on reload/navigation
+  window.addEventListener('beforeunload', () => {
+    try { mo.disconnect(); } catch {}
+    try { clearInterval(intervalId); } catch {}
+  });
+})();
