@@ -1,4 +1,4 @@
-// === Linkedin Job Helper: VAS (Viewed/Applied/Saved) highlighter + exporter ===
+// === Linkedin Job Helper: VAS (Viewed/Applied/Saved) highlighter + details sender (de-duped) ===
 (() => {
   if (window.__LVH_RUNNING__) return;
   window.__LVH_RUNNING__ = true;
@@ -10,6 +10,7 @@
   const FOOTER_SEL =
     '.job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state';
   const INNER_CARD_SEL = '.job-card-container';
+  const ACTIVE_MARKER_SEL = '.jobs-search-results-list__list-item--active, [aria-current="page"]';
 
   // ------------- Settings (API) -------------
   let SETTINGS = { apiUrl: "", apiKey: "" };
@@ -28,7 +29,6 @@
     const style = document.createElement("style");
     style.id = "lvh-style";
     style.textContent = `
-      /* Always show cards we touch */
       li[data-occludable-job-id].lvh-force-show,
       li.scaffold-layout__list-item.lvh-force-show,
       li.occludable-update.lvh-force-show {
@@ -36,12 +36,11 @@
         visibility: visible !important;
         opacity: 1 !important;
       }
-      /* Internal-looking border without shifting layout */
       .lvh-flagged-card { position: relative !important; }
       .lvh-flagged-card::after {
         content: "";
         position: absolute;
-        inset: 8px;              /* increase to pull border further inward */
+        inset: 10px;              /* inward border (padding look) */
         border: 2px solid red;
         border-radius: 12px;
         pointer-events: none;
@@ -51,7 +50,7 @@
     document.head.appendChild(style);
   })();
 
-  // ------------- Helpers -------------
+  // ------------- Helpers (highlighting) -------------
   const getCardLI = (el) => el.closest?.(CARD_SEL) || null;
   const getInnerCard = (li) => li.querySelector(INNER_CARD_SEL) || li;
 
@@ -89,80 +88,145 @@
 
   function scan(root = document) {
     const cards = root.querySelectorAll(CARD_SEL);
-    cards.forEach((li) => {
-      applyHighlight(li);
-      queueForExport(li);
-    });
+    cards.forEach((li) => applyHighlight(li));
   }
 
-  // ------------- Exporter (non-VAS jobs only) -------------
-  const sentJobs = new Set();         // session-only de-duplication
-  let exportTimer = null;
-  const exportQueue = new Map();      // jobId -> payload
+  // ------------- Details sender (fires on open) -------------
+  const sentDetailJobs = new Set();   // sent already this session
+  const capturePending = new Set();   // capture in progress per job id
 
-  function extractJobData(li) {
-    try {
-      const inner = getInnerCard(li);
-      const id =
-        inner.getAttribute("data-job-id") ||
-        li.getAttribute("data-occludable-job-id") ||
-        "";
+  function activeCardLI() {
+    const activeInner =
+      document.querySelector(`${INNER_CARD_SEL}${ACTIVE_MARKER_SEL ? ACTIVE_MARKER_SEL.replace(/^/, '') : ''}`) ||
+      document.querySelector(ACTIVE_MARKER_SEL)?.closest(INNER_CARD_SEL);
+    const li = activeInner ? activeInner.closest(CARD_SEL) : null;
+    return li || null;
+  }
 
-      const titleA = inner.querySelector('a.job-card-container__link, a[href*="/jobs/view/"]');
-      const title = titleA?.textContent?.trim() || "";
-      const link = titleA?.href || "";
+  function extractBasicFromLI(li) {
+    const inner = getInnerCard(li);
+    const id =
+      inner.getAttribute("data-job-id") ||
+      li.getAttribute("data-occludable-job-id") ||
+      "";
 
-      const company = inner.querySelector('.artdeco-entity-lockup__subtitle, [class*="entity-lockup__subtitle"]')?.textContent?.trim() || "";
-      const location = inner.querySelector('.job-card-container__metadata-wrapper li, [class*="metadata-wrapper"] li')?.textContent?.trim() || "";
+    const titleA = inner.querySelector('a.job-card-container__link, a[href*="/jobs/view/"]');
+    const title = titleA?.textContent?.trim() || "";
+    const link = titleA?.href || "";
 
-      const posted = inner.querySelector('time')?.getAttribute('datetime') ||
+    const company = inner.querySelector('.artdeco-entity-lockup__subtitle, [class*="entity-lockup__subtitle"]')?.textContent?.trim() || "";
+    const location = inner.querySelector('.job-card-container__metadata-wrapper li, [class*="metadata-wrapper"] li')?.textContent?.trim() || "";
+    const postedAt = inner.querySelector('time')?.getAttribute('datetime') ||
                      inner.querySelector('time')?.textContent?.trim() || "";
 
-      return { id, title, company, location, link, postedAt: posted };
-    } catch {
-      return null;
-    }
+    return { id, title, company, location, link, postedAt };
   }
 
-  function queueForExport(li) {
-    if (!SETTINGS.apiUrl || !/^https?:\/\//i.test(SETTINGS.apiUrl)) return;
-    if (li.__lvh_isVAS) return;
+  function grabDetailsHTML() {
+    const container =
+      document.querySelector('div.jobs-description.job-details-module') ||
+      document.querySelector('div.job-details-module') ||
+      document.querySelector('#job-details')?.closest('.jobs-description') ||
+      null;
 
-    const data = extractJobData(li);
-    if (!data || !data.id) return;
-    if (sentJobs.has(data.id)) return;
+    if (!container) return null;
 
-    exportQueue.set(data.id, data);
-    scheduleExport();
+    const htmlNode =
+      container.querySelector('#job-details') ||
+      container.querySelector('.jobs-box__html-content') ||
+      container;
+
+    const detailsHtml = htmlNode.innerHTML || "";
+    const detailsText = htmlNode.textContent?.trim() || "";
+
+    return { detailsHtml, detailsText };
   }
 
-  function scheduleExport() {
-    if (exportTimer) return;
-    exportTimer = setTimeout(flushExport, 800);
+  function shouldSend() {
+    return SETTINGS.apiUrl && /^https?:\/\//i.test(SETTINGS.apiUrl);
   }
 
-  async function flushExport() {
-    const batch = Array.from(exportQueue.values());
-    exportQueue.clear();
-    exportTimer = null;
-    if (!batch.length) return;
-
+  async function sendDetails(payload) {
     try {
       await fetch(SETTINGS.apiUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(SETTINGS.apiKey ? { "Authorization": `Bearer ${SETTINGS.apiKey}` } : {})
+          ...(SETTINGS.apiKey ? { "Authorization": `Bearer ${SETTINGS.apiKey}` } : {}),
         },
-        body: JSON.stringify({ jobs: batch })
+        body: JSON.stringify({ job: payload }),
       });
-      batch.forEach(j => sentJobs.add(j.id));
     } catch {
-      // Leave silent; items will re-queue on next DOM mutation/scan.
+      // silent
     }
   }
 
-  // ------------- Observers & timers -------------
+  // De-duped capture: one interval per job id; skip if pending or sent
+  function captureAndSendFor(li) {
+    if (!li || li.__lvh_isVAS) return; // only non-VAS
+    const basic = extractBasicFromLI(li);
+    const id = basic.id;
+    if (!id) return;
+    if (!shouldSend()) return;
+    if (sentDetailJobs.has(id) || capturePending.has(id)) return;
+
+    capturePending.add(id);
+
+    let tries = 0;
+    const maxTries = 40; // ~4s at 100ms
+    const t = setInterval(() => {
+      tries++;
+      const details = grabDetailsHTML();
+      if (details && details.detailsHtml && details.detailsHtml.length > 40) {
+        clearInterval(t);
+        sentDetailJobs.add(id);
+        capturePending.delete(id);
+        sendDetails({ ...basic, ...details });
+      } else if (tries >= maxTries) {
+        clearInterval(t);
+        capturePending.delete(id);
+      }
+    }, 100);
+  }
+
+  // Clicks on job cards/links
+  document.addEventListener('click', (e) => {
+    const li = getCardLI(e.target);
+    if (li) setTimeout(() => captureAndSendFor(li), 150);
+  }, true);
+
+  // When active job changes via keyboard/programmatic navigation
+  const activeWatcher = new MutationObserver(() => {
+    const li = activeCardLI();
+    if (li) captureAndSendFor(li);
+  });
+  activeWatcher.observe(document.documentElement, {
+    subtree: true,
+    childList: true,
+    attributes: true,
+    attributeFilter: ['class', 'aria-current']
+  });
+
+  // Also fire on history changes (SPA route to a job)
+  ['pushState', 'replaceState'].forEach(fn => {
+    const orig = history[fn];
+    history[fn] = function (...args) {
+      const r = orig.apply(this, args);
+      setTimeout(() => {
+        const li = activeCardLI();
+        if (li) captureAndSendFor(li);
+      }, 200);
+      return r;
+    };
+  });
+  window.addEventListener('popstate', () => {
+    setTimeout(() => {
+      const li = activeCardLI();
+      if (li) captureAndSendFor(li);
+    }, 200);
+  });
+
+  // ------------- Boot: highlight once -------------
   let scanPending = false;
   function scheduleScan(target) {
     if (scanPending) return;
@@ -198,20 +262,12 @@
   });
   mo.observe(document.documentElement, { childList: true, subtree: true });
 
-  ["pushState", "replaceState"].forEach((fn) => {
-    const orig = history[fn];
-    history[fn] = function (...args) {
-      const r = orig.apply(this, args);
-      scheduleScan();
-      return r;
-    };
-  });
-  window.addEventListener("popstate", () => scheduleScan());
-
+  // Periodic safety net (lightweight)
   const intervalId = setInterval(() => scan(), 3000);
 
   window.addEventListener("beforeunload", () => {
     try { mo.disconnect(); } catch {}
+    try { activeWatcher.disconnect(); } catch {}
     try { clearInterval(intervalId); } catch {}
   });
 })();
