@@ -2,33 +2,46 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>Linkedin Job Helper — Settings</title>
+    <title>Linkedin Job Helper – Options</title>
     <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; padding: 16px; }
-      .row { margin-bottom: 12px; }
-      label { display: block; font-weight: 600; margin-bottom: 6px; }
-      input { width: 100%; padding: 8px; box-sizing: border-box; }
-      .hint { color: #666; font-size: 12px; margin-top: 4px; }
-      button { padding: 8px 12px; }
-      #status { margin-left: 8px; font-size: 12px; }
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 16px; }
+      label { display:block; font-weight:600; margin-top:12px; }
+      input[type="text"] { width: 100%; padding: 8px; box-sizing: border-box; }
+      textarea { width: 100%; height: 220px; padding: 8px; box-sizing: border-box; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+      .row { margin-top: 8px; }
+      .btns { margin-top: 16px; display:flex; gap:8px; }
+      button { padding:8px 12px; }
+      .hint { color:#666; font-size:12px; }
     </style>
   </head>
   <body>
-    <h1>Linkedin Job Helper — Settings</h1>
+    <h1>Linkedin Job Helper – Options</h1>
 
-    <div class="row">
-      <label for="apiUrl">API URL</label>
-      <input id="apiUrl" type="url" placeholder="https://api.example.com/jobs" />
-      <div class="hint">POST endpoint that accepts JSON. Example: <code>https://api.example.com/jobs</code></div>
+    <label for="apiUrl">API URL</label>
+    <input id="apiUrl" type="text" placeholder="https://your.api/endpoint" />
+
+    <label for="apiKey">API Key</label>
+    <input id="apiKey" type="text" placeholder="sk-..." />
+
+    <label for="requestPayload">Request Payload</label>
+    <div class="hint">
+      Provide a JSON template. The extension will replace the
+      <code>content</code> of the message with <code>"role": "user"</code> by the job description text before sending.<br/>
+      Example:
+      <pre>{
+  "messages": [
+    {"role":"system","content":"You are a job screener."},
+    {"role":"user","content":"(will be replaced by job description)"}
+  ]
+}</pre>
     </div>
+    <textarea id="requestPayload" placeholder='{"messages":[{"role":"system","content":"..."},{"role":"user","content":"(will be replaced)"}]}'></textarea>
 
-    <div class="row">
-      <label for="apiKey">API Key</label>
-      <input id="apiKey" type="password" placeholder="Your secret API key" />
-      <div class="hint">Stored in <code>chrome.storage.sync</code>.</div>
+    <div class="btns">
+      <button id="save">Save</button>
+      <button id="reset">Reset to Example</button>
+      <span id="status" class="row"></span>
     </div>
-
-    <button id="save">Save</button><span id="status"></span>
 
     <script src="options.js"></script>
   </body>
