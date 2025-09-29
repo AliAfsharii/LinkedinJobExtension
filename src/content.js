@@ -1,4 +1,4 @@
-// === Linkedin Job Helper: Title colorizer + API verdicts (green/purple) ===
+// === Linkedin Job Helper: Title colorizer + API verdicts (green/purple) + Auto-save on suitable ===
 (() => {
   if (window.__LVH_RUNNING__) return;
   window.__LVH_RUNNING__ = true;
@@ -133,8 +133,19 @@
     activeCheckTimer = setTimeout(() => {
       activeCheckTimer = null;
       const li = getActiveCard();
-      if (!li) return;
-      const jobId = getJobId(li);
+      let jobId = li ? getJobId(li) : null;
+
+      // Fallback: parse from right-pane H1 link
+      if (!jobId) {
+        const a = document.querySelector(
+          '.job-details-jobs-unified-top-card__job-title a[href*="/jobs/view/"]'
+        );
+        if (a && a.href) {
+          const m = a.href.match(/\/jobs\/view\/(\d+)/);
+          if (m) jobId = m[1];
+        }
+      }
+
       if (!jobId || jobId === lastActiveJobId) return;
       lastActiveJobId = jobId;
       console.log('[LVH] active job changed:', jobId);
@@ -143,7 +154,7 @@
         const desc = getCurrentDescriptionText();
         console.log('[LVH] captured description length:', desc.length);
         if (desc) sendForJob(jobId, desc);
-        paintTitle(li);
+        if (li) paintTitle(li);
       }, 350);
     }, 120);
   }
@@ -157,14 +168,12 @@
       body = {};
     }
 
-    // Do NOT add jobId at top level anymore.
-    // Instead, put it into the user's message content as a JSON string.
+    // Put jobId + description into the user's message content.
     if (body && typeof body === 'object') {
       const msgs = body.messages;
       if (Array.isArray(msgs)) {
         const userMsg = msgs.find(m => m && m.role === 'user');
         if (userMsg) {
-          // content becomes a JSON string with both jobId and description
           userMsg.content = JSON.stringify({
             jobId,
             description: descriptionText || ''
@@ -173,6 +182,89 @@
       }
     }
     return body;
+  }
+
+  // ---- Auto-save helpers ----
+  const saveClickCooldown = new Map(); // jobId -> ts
+
+  function getCurrentJobIdFromPane() {
+    // 1) Active list item, if present
+    const li = getActiveCard();
+    const idFromList = li ? getJobId(li) : null;
+    if (idFromList) return idFromList;
+
+    // 2) Parse from the job header link in the right pane
+    const a = document.querySelector(
+      '.job-details-jobs-unified-top-card__job-title a[href*="/jobs/view/"]'
+    );
+    if (a && a.href) {
+      const m = a.href.match(/\/jobs\/view\/(\d+)/);
+      if (m) return m[1];
+    }
+    return null;
+  }
+
+  function findSaveButtonInPane() {
+    // Prefer the two-pane top card container. Fallback to document.
+    const paneRoot =
+      document.querySelector('.job-details-jobs-unified-top-card__container--two-pane') ||
+      document;
+
+    const candidates = [
+      'button.jobs-save-button', // exact class in provided DOM
+      'button[data-test-global-save-job-button]',
+      '#job-details button[aria-label*="Save"]',
+      '#job-details button[aria-label*="Saved"]',
+      'button[aria-label*="Save"]',
+      'button[aria-label*="Saved"]'
+    ];
+
+    for (const sel of candidates) {
+      const btn = paneRoot.querySelector(sel);
+      if (btn) return btn;
+    }
+    return null;
+  }
+
+  function isSaveButtonPressed(btn) {
+    const aria = btn.getAttribute('aria-pressed');
+    const pressedByAria = aria === 'true';
+    const pressedByClass = btn.classList.contains('artdeco-button--pressed');
+    const txt = (btn.innerText || '').trim();
+    const pressedByText = /\bSaved|Unsave|Saved job/i.test(txt);
+    return pressedByAria || pressedByClass || pressedByText;
+  }
+
+  function tryAutoSave(jobId) {
+    // Only save if the pane still shows this job
+    const current = getCurrentJobIdFromPane();
+    if (!current || current !== jobId) {
+      console.log('[LVH] skip autosave: pane not on jobId', jobId, 'current=', current);
+      return;
+    }
+
+    const now = Date.now();
+    const last = saveClickCooldown.get(jobId) || 0;
+    if (now - last < 1500) return; // throttle
+    saveClickCooldown.set(jobId, now);
+
+    const btn = findSaveButtonInPane();
+    if (!btn) {
+      console.log('[LVH] save button not found for jobId', jobId);
+      return;
+    }
+
+    if (isSaveButtonPressed(btn)) {
+      console.log('[LVH] job already saved, no click', jobId);
+      return;
+    }
+
+    try {
+      btn.click();
+      console.log('[LVH] clicked Save for jobId', jobId);
+    } catch (e) {
+      console.warn('[LVH] failed to click Save:', e);
+    }
   }
 
   // ---- API call / parse response ----
@@ -229,6 +321,7 @@
           if (typeof verdictObj?.suitable === 'boolean' && respJobId) {
             verdicts[respJobId] = verdictObj.suitable; // true => green, false => purple
             saveVerdictsDebounced();
+
             // repaint only the job returned by API
             const li =
               document.querySelector(
@@ -239,7 +332,13 @@
               )?.closest(CARD_SEL);
             if (li) paintTitle(li);
             else repaintAll(); // fallback
+
             console.log('[LVH] verdict applied', respJobId, verdictObj.suitable);
+
+            // Auto-click Save if suitable
+            if (verdictObj.suitable === true) {
+              setTimeout(() => tryAutoSave(respJobId), 400); // allow UI to settle
+            }
           }
         } catch (e2) {
           console.warn('[LVH] Could not parse message.content as JSON:', e2);
@@ -252,11 +351,19 @@
 
   // ---- Extract description from right pane ----
   function getCurrentDescriptionText() {
-    const el =
+    // Prefer new pane containers if present; fallback to legacy selectors
+    const pane =
+      document.querySelector('.job-details-jobs-unified-top-card__container--two-pane') ||
       document.querySelector('#job-details') ||
       document.querySelector('.jobs-description-content') ||
       document.querySelector(DETAILS_CONTAINER_SEL);
-    if (!el) return '';
+
+    if (!pane) return '';
+    // Description can be elsewhere; capture visible text of the pane area
+    const el =
+      pane.querySelector('[data-test-description], .jobs-description, .jobs-box__html-content, .jobs-description-content, #job-details') ||
+      pane;
+
     return (el.innerText || '').trim();
   }
 
@@ -297,7 +404,9 @@
           n.matches?.('.job-card-container') ||
           n.querySelector?.('.job-card-container') ||
           n.matches?.(FOOTER_SEL) ||
-          n.querySelector?.(FOOTER_SEL)
+          n.querySelector?.(FOOTER_SEL) ||
+          n.matches?.('.job-details-jobs-unified-top-card__container--two-pane') ||
+          n.querySelector?.('.job-details-jobs-unified-top-card__container--two-pane')
         ) {
           needScan = true;
         }
