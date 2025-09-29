@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "LinkedIn: Hide Viewed Jobs",
+  "version": "1.0.1",
+  "description": "Hide jobs marked as 'Viewed' on LinkedIn job search.",
+  "icons": { "128": "icon128.png" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.linkedin.com/jobs/search*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
