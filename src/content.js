@@ -1,35 +1,47 @@
-// === LinkedIn VAS (Viewed/Applied/Saved) highlighter – no hiding, no selection logic ===
+// === LinkedIn VAS (Viewed/Applied/Saved) highlighter — no hiding, just border ===
 (() => {
   if (window.__LVH_RUNNING__) return;
   window.__LVH_RUNNING__ = true;
 
   const STATE_RE = /\b(Viewed|Applied|Saved)\b/i;
 
-  // A job card <li>
   const CARD_SEL =
     'li[data-occludable-job-id], li.scaffold-layout__list-item, li.occludable-update';
-  // Footer bits that may contain the state text
   const FOOTER_SEL =
     '.job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state';
-  // Inner visual container to draw the outline on
   const INNER_CARD_SEL = '.job-card-container';
 
-  // ----- Styles (uniform red outline on all sides) -----
+  // ----- Styles (inner border using a pseudo-element) -----
   (function ensureStyle() {
-    if (document.getElementById('lvh-style')) return;
-    const style = document.createElement('style');
-    style.id = 'lvh-style';
+    let style = document.getElementById('lvh-style');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'lvh-style';
+      document.head.appendChild(style);
+    }
     style.textContent = `
       .lvh-flagged-card {
-        outline: 2px solid red !important;
-        outline-offset: 0 !important;
-        border-left: 0 !important; /* neutralize LinkedIn's left rule */
+        /* Add space so the inner border doesn't sit under neighbors */
+        padding: 10px !important;
+        border-radius: 10px !important;
+        position: relative !important;
+        z-index: 0 !important;
+      }
+      .lvh-flagged-card::after {
+        content: "";
+        position: absolute;
+        /* Pull the border further INSIDE the card */
+        inset: 6px;
+        border: 2px solid red;
+        border-radius: 8px;
+        pointer-events: none;
+        z-index: 1;
       }
     `;
-    document.head.appendChild(style);
   })();
 
-  const getInnerCard = (li) => li.querySelector(INNER_CARD_SEL) || li;
+  // ----- Helpers -----
+  const getInnerCard = (li) => (li ? li.querySelector(INNER_CARD_SEL) || li : null);
 
   function hasVAS(li) {
     const footerItems = li.querySelectorAll(FOOTER_SEL);
@@ -40,37 +52,34 @@
     return false;
   }
 
-  function apply(li) {
+  function applyHighlight(li) {
     const inner = getInnerCard(li);
     if (!inner) return;
-    if (hasVAS(li)) {
-      inner.classList.add('lvh-flagged-card');
-    } else {
-      inner.classList.remove('lvh-flagged-card');
-    }
+    if (hasVAS(li)) inner.classList.add('lvh-flagged-card');
+    else inner.classList.remove('lvh-flagged-card');
   }
 
   function scan(root = document) {
-    root.querySelectorAll(CARD_SEL).forEach(apply);
+    const cards = root.querySelectorAll(CARD_SEL);
+    cards.forEach((li) => applyHighlight(li));
   }
 
-  // Debounced rescans to avoid thrashing
-  let t = null;
-  const scheduleScan = () => {
-    if (t) return;
-    t = setTimeout(() => {
-      t = null;
+  // Debounced rescans
+  let scanTimer = null;
+  function scheduleScan(delay = 120) {
+    if (scanTimer) return;
+    scanTimer = setTimeout(() => {
+      scanTimer = null;
       scan();
-    }, 200);
-  };
+    }, delay);
+  }
 
   // Initial pass
   scan();
 
-  // Observe DOM additions/changes; do not watch attributes to avoid loops on selection changes
+  // Observe DOM changes
   const mo = new MutationObserver((muts) => {
     for (const m of muts) {
-      // New nodes or footer text changes can affect VAS state
       if (m.type === 'childList') {
         for (const n of m.addedNodes) {
           if (!(n instanceof Element)) continue;
@@ -78,16 +87,19 @@
             n.matches?.(CARD_SEL) ||
             n.querySelector?.(CARD_SEL) ||
             n.matches?.(FOOTER_SEL) ||
-            n.querySelector?.(FOOTER_SEL)
+            n.querySelector?.(FOOTER_SEL) ||
+            n.matches?.('.job-card-container') ||
+            n.querySelector?.('.job-card-container')
           ) {
             scheduleScan();
-            break;
+            return;
           }
         }
       } else if (m.type === 'characterData') {
-        // Footer text updated
-        if (m.target?.parentElement?.matches?.(FOOTER_SEL)) {
+        const p = m.target.parentElement;
+        if (p && (p.matches(FOOTER_SEL) || p.closest(FOOTER_SEL))) {
           scheduleScan();
+          return;
         }
       }
     }
@@ -103,18 +115,13 @@
     const orig = history[fn];
     history[fn] = function (...args) {
       const r = orig.apply(this, args);
-      scheduleScan();
+      scheduleScan(200);
       return r;
     };
   });
-  window.addEventListener('popstate', scheduleScan);
+  window.addEventListener('popstate', () => scheduleScan(200));
 
-  // Light periodic safety net
-  const intervalId = setInterval(scan, 3000);
-
-  // Cleanup on unload
   window.addEventListener('beforeunload', () => {
     try { mo.disconnect(); } catch {}
-    try { clearInterval(intervalId); } catch {}
   });
 })();
