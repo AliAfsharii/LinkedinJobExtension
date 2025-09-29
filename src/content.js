@@ -48,13 +48,12 @@
   })();
 
   // ---- State: verdicts per jobId ----
-  // verdicts[jobId] = true | false
-  const verdicts = Object.create(null);
+  const verdicts = Object.create(null); // verdicts[jobId] = true|false
   let verdictsLoaded = false;
 
   chrome.storage.sync.get(['lvhVerdicts']).then(v => {
     const map = v.lvhVerdicts || {};
-    for (const [k, val] of Object.entries(map)) verdicts[k] = !!val;
+    Object.entries(map).forEach(([k, val]) => (verdicts[k] = !!val));
     verdictsLoaded = true;
     console.log('[LVH] verdicts loaded', verdicts);
     repaintAll();
@@ -98,11 +97,8 @@
 
     const id = getJobId(li);
     if (id && id in verdicts) {
-      if (verdicts[id] === true) {
-        title.classList.add('lvh-title-green');
-      } else {
-        title.classList.add('lvh-title-purple');
-      }
+      if (verdicts[id] === true) title.classList.add('lvh-title-green');
+      else title.classList.add('lvh-title-purple');
       return;
     }
 
@@ -119,11 +115,10 @@
     const cards = root.querySelectorAll(CARD_SEL);
     console.log('[LVH] scan cards:', cards.length);
     cards.forEach(li => paintTitle(li));
-    // Also try to process currently active after scans
     scheduleActiveCheck();
   }
 
-  // ---- Active card detection ----
+  // ---- Active card detection -> send description to API ----
   function getActiveCard() {
     const marker = document.querySelector(ACTIVE_SEL);
     if (!marker) return null;
@@ -148,14 +143,13 @@
         const desc = getCurrentDescriptionText();
         console.log('[LVH] captured description length:', desc.length);
         if (desc) sendForJob(jobId, desc);
-        // repaint this title in case verdict already existed
         paintTitle(li);
       }, 350);
     }, 120);
   }
 
-  // ---- API: build request body from options payload ----
-  function buildRequestBody(descriptionText) {
+  // ---- Build request body (inject description + jobId INSIDE user message content) ----
+  function buildRequestBody(descriptionText, jobId) {
     let body = {};
     try {
       body = JSON.parse(SETTINGS.requestPayload || '{}');
@@ -163,20 +157,26 @@
       body = {};
     }
 
+    // Do NOT add jobId at top level anymore.
+    // Instead, put it into the user's message content as a JSON string.
     if (body && typeof body === 'object') {
       const msgs = body.messages;
       if (Array.isArray(msgs)) {
         const userMsg = msgs.find(m => m && m.role === 'user');
         if (userMsg) {
-          userMsg.content = descriptionText || '';
+          // content becomes a JSON string with both jobId and description
+          userMsg.content = JSON.stringify({
+            jobId,
+            description: descriptionText || ''
+          });
         }
       }
     }
     return body;
   }
 
-  // ---- API call / parsing response ----
-  const perJobCooldown = new Map(); // jobId -> ts last sent
+  // ---- API call / parse response ----
+  const perJobCooldown = new Map(); // jobId -> ts
 
   async function sendForJob(jobId, descriptionText) {
     if (!SETTINGS.apiUrl || !/^https?:\/\//i.test(SETTINGS.apiUrl)) {
@@ -187,13 +187,10 @@
 
     const now = Date.now();
     const last = perJobCooldown.get(jobId) || 0;
-    if (now - last < 1000) {
-      // prevent accidental rapid duplicates on the same selection
-      return;
-    }
+    if (now - last < 1000) return; // prevent rapid dupes
     perJobCooldown.set(jobId, now);
 
-    const body = buildRequestBody(descriptionText);
+    const body = buildRequestBody(descriptionText, jobId);
 
     // Log request body before sending
     try {
@@ -228,19 +225,21 @@
       if (typeof contentStr === 'string' && contentStr.trim()) {
         try {
           const verdictObj = JSON.parse(contentStr);
-          if (typeof verdictObj?.suitable === 'boolean') {
-            verdicts[jobId] = verdictObj.suitable; // true => green, false => purple
+          const respJobId = verdictObj?.jobId || jobId;
+          if (typeof verdictObj?.suitable === 'boolean' && respJobId) {
+            verdicts[respJobId] = verdictObj.suitable; // true => green, false => purple
             saveVerdictsDebounced();
-            // repaint only this job’s title
+            // repaint only the job returned by API
             const li =
               document.querySelector(
-                `${CARD_SEL}[data-occludable-job-id="${jobId}"]`
+                `${CARD_SEL}[data-occludable-job-id="${respJobId}"]`
               ) ||
               document.querySelector(
-                `${CARD_SEL} .job-card-container[data-job-id="${jobId}"]`
+                `${CARD_SEL} .job-card-container[data-job-id="${respJobId}"]`
               )?.closest(CARD_SEL);
             if (li) paintTitle(li);
-            console.log('[LVH] verdict applied', jobId, verdictObj.suitable);
+            else repaintAll(); // fallback
+            console.log('[LVH] verdict applied', respJobId, verdictObj.suitable);
           }
         } catch (e2) {
           console.warn('[LVH] Could not parse message.content as JSON:', e2);
@@ -286,7 +285,6 @@
         if (m.target.matches?.(ACTIVE_SEL)) {
           sawActiveChange = true;
         }
-        // If any element inside a card toggles active marker, we still want to check
         if (getCardLI(m.target)) {
           sawActiveChange = true;
         }
@@ -330,7 +328,6 @@
     scheduleActiveCheck();
   });
 
-  // Light periodic safety net
   const intervalId = setInterval(() => {
     if (!verdictsLoaded) return;
     repaintAll();
