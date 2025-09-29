@@ -1,4 +1,4 @@
-// === Linkedin Job Helper: Title colorizer + API verdicts + Auto-save on suitable + Auto loop with robust page preload ===
+// === Linkedin Job Helper: Title colorizer + API verdicts + Auto-save on suitable + Auto loop with gradual preload ===
 (() => {
   if (window.__LVH_RUNNING__) return;
   window.__LVH_RUNNING__ = true;
@@ -95,12 +95,9 @@
     }
     if (hasVAS(li)) title.classList.add("lvh-title-red");
   }
-  function repaintAll(root = document) {
-    root.querySelectorAll(CARD_SEL).forEach(paintTitle);
-  }
+  function repaintAll(root = document) { root.querySelectorAll(CARD_SEL).forEach(paintTitle); }
   function scan(root = document) {
-    const cards = root.querySelectorAll(CARD_SEL);
-    cards.forEach((li) => paintTitle(li));
+    root.querySelectorAll(CARD_SEL).forEach((li) => paintTitle(li));
     scheduleActiveCheck();
   }
 
@@ -119,9 +116,7 @@
       const li = getActiveCard();
       let jobId = li ? getJobId(li) : null;
       if (!jobId) {
-        const a = document.querySelector(
-          '.job-details-jobs-unified-top-card__job-title a[href*="/jobs/view/"]'
-        );
+        const a = document.querySelector('.job-details-jobs-unified-top-card__job-title a[href*="/jobs/view/"]');
         if (a && a.href) {
           const m = a.href.match(/\/jobs\/view\/(\d+)/);
           if (m) jobId = m[1];
@@ -160,9 +155,7 @@
     const li = getActiveCard();
     const idFromList = li ? getJobId(li) : null;
     if (idFromList) return idFromList;
-    const a = document.querySelector(
-      '.job-details-jobs-unified-top-card__job-title a[href*="/jobs/view/"]'
-    );
+    const a = document.querySelector('.job-details-jobs-unified-top-card__job-title a[href*="/jobs/view/"]');
     if (a && a.href) {
       const m = a.href.match(/\/jobs\/view\/(\d+)/);
       if (m) return m[1];
@@ -304,10 +297,7 @@
       scan(target || document);
     }, 120);
   }
-  (function initial() {
-    scan();
-    scheduleActiveCheck();
-  })();
+  (function initial() { scan(); scheduleActiveCheck(); })();
   const mo = new MutationObserver((muts) => {
     let needScan = false;
     let sawActiveChange = false;
@@ -352,7 +342,7 @@
     try { clearInterval(intervalId); } catch {}
   });
 
-  // ======= Automation with virtualization-aware preload + next-page =======
+  // ======= Automation with gradual preload + next-page =======
   const waitForVerdictResolvers = new Map();
   function waitForVerdict(jobId, timeoutMs = 15000) {
     return new Promise((resolve) => {
@@ -367,14 +357,12 @@
   }
 
   function getResultsScrollContainer() {
-    // Find a scrollable ancestor of the first job card
     const first = document.querySelector('li[data-occludable-job-id]');
     let el = first ? first.parentElement : null;
     for (let i = 0; i < 6 && el; i++, el = el.parentElement) {
       const cs = getComputedStyle(el);
       if (/(auto|scroll)/.test(cs.overflowY)) return el;
     }
-    // Fallback to a known container or document
     return (
       document.querySelector('.jobs-search-results-list') ||
       document.querySelector('.jobs-search-results') ||
@@ -382,57 +370,71 @@
     );
   }
 
-  async function collectAllJobsOnPage(maxScrolls = 30) {
-    const map = new Map(); // id -> element
-    let stableRounds = 0;
-    let lastCount = 0;
-
+  // Gradual scroll to end over ~2s, harvesting as we go
+  async function gradualFillAndHarvest(durationMs = 2000) {
     const scroller = getResultsScrollContainer();
+    const map = new Map(); // id -> element
+
     function harvest() {
       document.querySelectorAll(CARD_SEL).forEach((li) => {
         const id = getJobId(li);
         if (id) map.set(id, li);
       });
     }
-
     harvest();
 
-    for (let i = 0; i < maxScrolls; i++) {
-      // Scroll to bottom to force virtualization to load more
-      scroller.scrollTop = scroller.scrollHeight;
-      await sleep(350);
+    const start = performance.now();
+    let lastHeight = 0;
+
+    while (true) {
+      const now = performance.now();
+      const t = Math.min(1, (now - start) / durationMs);          // 0..1
+      const ease = t * (2 - t);                                   // ease-out
+      const target = scroller.scrollHeight - scroller.clientHeight;
+      scroller.scrollTop = target * ease;
+
+      await sleep(60);
       harvest();
 
-      if (map.size === lastCount) {
-        stableRounds += 1;
-        if (stableRounds >= 2) break; // no new items after two checks
-      } else {
-        stableRounds = 0;
-        lastCount = map.size;
+      // if near end and height no longer grows for a few ticks, stop
+      const nearEnd = (target - scroller.scrollTop) < 8;
+      const h = scroller.scrollHeight;
+      if (nearEnd && Math.abs(h - lastHeight) < 2 && t >= 1) break;
+      lastHeight = h;
+
+      if (t >= 1 && !nearEnd) {
+        // Safety: if duration elapsed but not at end, continue stepping
+        continue;
       }
     }
 
-    // Scroll back to top to start in order
-    scroller.scrollTop = 0;
-    await sleep(150);
+    // Settle: small extra scrolls to ensure middle chunks render
+    for (let i = 0; i < 6; i++) {
+      scroller.scrollTop = scroller.scrollHeight;
+      await sleep(120);
+      harvest();
+    }
 
-    // Return in DOM order using current NodeList but filter by collected IDs
-    const order = [];
+    // Return to top for ordered processing
+    scroller.scrollTop = 0;
+    await sleep(200);
+
+    console.log("[LVH] gradual preload collected jobs:", map.size);
+
+    // Build ordered list by DOM, then append any off-DOM leftovers
+    const ordered = [];
     const ids = new Set(map.keys());
     document.querySelectorAll(CARD_SEL).forEach((li) => {
       const id = getJobId(li);
-      if (ids.has(id)) order.push(li);
+      if (ids.has(id)) ordered.push(li);
     });
-    // Append any left-over items not currently mounted
     for (const [id, el] of map) {
-      if (!order.some((li) => getJobId(li) === id)) order.push(el);
+      if (!ordered.some((li) => getJobId(li) === id)) ordered.push(el);
     }
-    console.log("[LVH] preload collected jobs:", map.size);
-    return order.filter((li) => getTitleEl(li));
+    return ordered.filter((li) => getTitleEl(li));
   }
 
   function getJobCardsQuick() {
-    // Quick snapshot without preloading (used after page change)
     const listRoot =
       document.querySelector('.jobs-search-results-list') ||
       document.querySelector('[data-test-reusables-search__result-container]') ||
@@ -462,8 +464,9 @@
     while (pageCount < maxPages) {
       pageCount++;
 
-      // Virtualization-aware preload on first pass of each page
-      const jobs = await collectAllJobsOnPage();
+      // Wait 5s for new page, then gradual 2s fill
+      await sleep(5000);
+      const jobs = await gradualFillAndHarvest(2000);
       console.log("[LVH] automation: found", jobs.length, "jobs on page", pageCount);
 
       for (let i = 0; i < jobs.length; i++) {
@@ -475,12 +478,13 @@
       console.log("[LVH] automation: page", pageCount, "done");
       const moved = await goToNextPage();
       if (!moved) break;
+
       await waitForJobListRefresh(10000);
     }
     console.log("[LVH] automation: finished");
   }
 
-  // Next-page detection and navigation
+  // Pagination
   function findNextPageButton() {
     const candidates = [
       '.jobs-search-pagination__button.jobs-search-pagination__button--next',
