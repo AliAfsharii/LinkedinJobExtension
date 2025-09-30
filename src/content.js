@@ -273,19 +273,23 @@
   }
 
   // Description
-  function getCurrentDescriptionText() {
-    const pane =
-      document.querySelector(".job-details-jobs-unified-top-card__container--two-pane") ||
-      document.querySelector("#job-details") ||
-      document.querySelector(".jobs-description-content") ||
-      document.querySelector(DETAILS_CONTAINER_SEL);
-    if (!pane) return "";
-    const el =
-      pane.querySelector(
-        "[data-test-description], .jobs-description, .jobs-box__html-content, .jobs-description-content, #job-details"
-      ) || pane;
-    return (el.innerText || "").trim();
-  }
+function getCurrentDescriptionText() {
+  // 1) Prefer the exact details node(s), pick the visible one
+  const pickVisible = (nodes) =>
+    Array.from(nodes).find((el) => {
+      const cs = getComputedStyle(el);
+      const vis = el.offsetParent !== null && cs.display !== "none" && cs.visibility !== "hidden";
+      return vis;
+    });
+
+  let el =
+    pickVisible(document.querySelectorAll('#job-details')) ||
+    pickVisible(document.querySelectorAll('.jobs-box__html-content#job-details')) ||
+    pickVisible(document.querySelectorAll('.jobs-description-content__text--stretch')) ||
+    pickVisible(document.querySelectorAll('[data-test-description], .jobs-box__html-content, .jobs-description'));
+
+  return (el?.innerText || "").trim();
+}
 
   // Observers
   let scanPending = false;
