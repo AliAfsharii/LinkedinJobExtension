@@ -1,4 +1,4 @@
-// === LinkedIn Verdict Helper (content.js) ===
+// === LinkedIn Verdict Helper (content.js) — sharded storage ===
 (() => {
   if (window.__LVH_RUNNING__) return;
   window.__LVH_RUNNING__ = true;
@@ -37,38 +37,95 @@
     document.head.appendChild(style);
   })();
 
-  // ---------- verdict storage (per-key lvh:<jobId>) ----------
+  // ---------- verdict storage (sharded) ----------
+  const SHARD_PREFIX = "lvhs:";       // shard key prefix
+  const SHARD_SIZE = 300;             // max ids per shard
+  const shards = new Map();           // shardKey -> { jobId: 1|0 }
+  const jobToShard = new Map();       // jobId -> shardKey
   const verdicts = Object.create(null);
   let verdictsLoaded = false;
 
-  function loadVerdicts() {
-    return chrome.storage.sync.get(null).then((all) => {
-      for (const [k, v] of Object.entries(all || {})) {
-        if (k.startsWith("lvh:")) verdicts[k.slice(4)] = !!v;
+  function shardIndexFromKey(k) {
+    const m = k.match(/^lvhs:(\d{4})$/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+  function nextShardKey() {
+    let maxIdx = 0;
+    for (const k of shards.keys()) {
+      const idx = shardIndexFromKey(k);
+      if (idx !== null) maxIdx = Math.max(maxIdx, idx);
+    }
+    const next = (maxIdx || 0) + 1;
+    return `${SHARD_PREFIX}${String(next).padStart(4, "0")}`;
+  }
+  function chooseShardForNew() {
+    // pick the fullest shard with space
+    let bestKey = null, bestSize = -1;
+    for (const [k, obj] of shards) {
+      const size = Object.keys(obj).length;
+      if (size < SHARD_SIZE && size > bestSize) { bestKey = k; bestSize = size; }
+    }
+    return bestKey || nextShardKey();
+  }
+
+  async function loadVerdictsSharded() {
+    const all = await chrome.storage.sync.get(null);
+    for (const [k, v] of Object.entries(all || {})) {
+      if (!k.startsWith(SHARD_PREFIX)) continue;
+      if (!v || typeof v !== "object") continue;
+      shards.set(k, v);
+      for (const [jid, bit] of Object.entries(v)) {
+        verdicts[jid] = !!bit;
+        jobToShard.set(jid, k);
       }
-      verdictsLoaded = true;
-      repaintAll();
-    });
+    }
+    verdictsLoaded = true;
+    repaintAll();
   }
-  function saveVerdict(jobId, val) {
-    chrome.storage.sync.set({ ["lvh:" + jobId]: !!val }).catch?.(() => {});
+
+  async function saveVerdictSharded(jobId, suitable) {
+    const bit = suitable ? 1 : 0;
+    let key = jobToShard.get(jobId);
+    if (!key) {
+      // place into existing shard with space, or new shard
+      key = chooseShardForNew();
+      if (!shards.has(key)) shards.set(key, {});
+      jobToShard.set(jobId, key);
+    }
+    const obj = shards.get(key) || {};
+    obj[jobId] = bit;
+    shards.set(key, obj);
+    await chrome.storage.sync.set({ [key]: obj });
   }
-  function watchVerdicts() {
+
+  function watchShards() {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "sync") return;
       let touched = false;
       for (const [k, ch] of Object.entries(changes)) {
-        if (!k.startsWith("lvh:")) continue;
-        const id = k.slice(4);
-        if (ch.newValue === undefined) delete verdicts[id];
-        else verdicts[id] = !!ch.newValue;
-        touched = true;
+        if (!k.startsWith(SHARD_PREFIX)) continue;
+        const newObj = ch.newValue || {};
+        shards.set(k, newObj);
+        // rebuild affected ids
+        for (const jid of Object.keys(verdicts)) {
+          if (jobToShard.get(jid) === k && !(jid in newObj)) {
+            delete verdicts[jid];
+            jobToShard.delete(jid);
+            touched = true;
+          }
+        }
+        for (const [jid, bit] of Object.entries(newObj)) {
+          verdicts[jid] = !!bit;
+          jobToShard.set(jid, k);
+          touched = true;
+        }
       }
       if (touched) repaintAll();
     });
   }
-  loadVerdicts();
-  watchVerdicts();
+
+  loadVerdictsSharded();
+  watchShards();
 
   // ---------- dom helpers ----------
   const getCardLI = (el) => el.closest?.(CARD_SEL) || null;
@@ -133,7 +190,7 @@
     }, 120);
   }
 
-  // ---------- request body builder ----------
+  // ---------- request body ----------
   function buildRequestBody(descriptionText, jobId) {
     let body = {};
     try { body = JSON.parse(SETTINGS.requestPayload || "{}"); }
@@ -216,8 +273,7 @@
         body: JSON.stringify(body)
       });
       text = await resp.text();
-      console.log("[LVH] response:", text);
-    } catch (e) { return; }
+    } catch { return; }
 
     try {
       const parsed = JSON.parse(text);
@@ -229,7 +285,7 @@
         const respJobId = verdictObj?.jobId || jobId;
         if (typeof verdictObj?.suitable === "boolean" && respJobId) {
           verdicts[respJobId] = verdictObj.suitable;
-          saveVerdict(respJobId, verdictObj.suitable);
+          await saveVerdictSharded(respJobId, verdictObj.suitable);
 
           const li =
             document.querySelector(`${CARD_SEL}[data-occludable-job-id="${respJobId}"]`) ||
@@ -355,8 +411,7 @@
 
   async function gradualFillAndHarvest(durationMs = 2000) {
     const scroller = getResultsScrollContainer();
-    const map = new Map(); // id -> element
-
+    const map = new Map();
     function harvest() {
       document.querySelectorAll(CARD_SEL).forEach((li) => {
         const id = getJobId(li);
@@ -364,37 +419,24 @@
       });
     }
     harvest();
-
     const start = performance.now();
     let lastHeight = 0;
-
     while (true) {
       const now = performance.now();
       const t = Math.min(1, (now - start) / durationMs);
       const ease = t * (2 - t);
       const target = scroller.scrollHeight - scroller.clientHeight;
       scroller.scrollTop = target * ease;
-
       await sleep(60);
       harvest();
-
       const nearEnd = (target - scroller.scrollTop) < 8;
       const h = scroller.scrollHeight;
       if (nearEnd && Math.abs(h - lastHeight) < 2 && t >= 1) break;
       lastHeight = h;
-
       if (t >= 1 && !nearEnd) continue;
     }
-
-    for (let i = 0; i < 6; i++) {
-      scroller.scrollTop = scroller.scrollHeight;
-      await sleep(120);
-      harvest();
-    }
-
-    scroller.scrollTop = 0;
-    await sleep(200);
-
+    for (let i = 0; i < 6; i++) { scroller.scrollTop = scroller.scrollHeight; await sleep(120); harvest(); }
+    scroller.scrollTop = 0; await sleep(200);
     const ordered = [];
     const ids = new Set(map.keys());
     document.querySelectorAll(CARD_SEL).forEach((li) => {
@@ -434,8 +476,7 @@
       await sleep(5000);
       const jobs = await gradualFillAndHarvest(2000);
       for (let i = 0; i < jobs.length; i++) {
-        try { await processSingleJob(jobs[i]); }
-        catch {}
+        try { await processSingleJob(jobs[i]); } catch {}
         await sleep(400);
       }
       const moved = await goToNextPage();
