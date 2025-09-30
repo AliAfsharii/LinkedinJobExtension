@@ -15,25 +15,23 @@
     </style>
   </head>
   <body>
-    <h1>Linkedin Job Helper – Options</h1>
+    <h2>API Settings</h2>
 
     <label for="apiUrl">API URL</label>
-    <input id="apiUrl" type="text" placeholder="https://your.api/endpoint" />
+    <input id="apiUrl" type="text" placeholder="https://api.example.com/v1/chat/completions" />
 
-    <label for="apiKey">API Key</label>
+    <label for="apiKey">API Key <span class="hint">(optional)</span></label>
     <input id="apiKey" type="text" placeholder="sk-..." />
 
-    <label for="requestPayload">Request Payload</label>
-    <div class="hint">
-      Provide a JSON template. The extension will replace the
-      <code>content</code> of the message with <code>"role": "user"</code> by the job description text before sending.<br/>
-      Example:
-      <pre>{
-  "messages": [
-    {"role":"system","content":"You are a job screener."},
-    {"role":"user","content":"(will be replaced by job description)"}
-  ]
-}</pre>
+    <div class="row">
+      <div class="hint">Request payload template (JSON). The job description and jobId will replace the user message content at runtime.</div>
+      <pre class="hint" style="white-space:pre-wrap">
+Expected server response (stringified JSON in assistant message):
+{
+  "jobId": "1234567890",
+  "suitable": true
+}
+      </pre>
     </div>
     <textarea id="requestPayload" placeholder='{"messages":[{"role":"system","content":"..."},{"role":"user","content":"(will be replaced)"}]}'></textarea>
 
