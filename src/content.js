@@ -262,7 +262,8 @@
     perJobCooldown.set(jobId, now);
 
     const body = buildRequestBody(descriptionText, jobId);
-    console.log('[LVH] request body', body);
+    console.log('[LVH] request body', body); // log request body
+
     let text = "";
     try {
       const resp = await fetch(SETTINGS.apiUrl, {
@@ -274,7 +275,7 @@
         body: JSON.stringify(body)
       });
       text = await resp.text();
-      console.log('[LVH] response body', text);
+      console.log('[LVH] response body', text); // log response body
     } catch { return; }
 
     try {
@@ -411,7 +412,7 @@
     );
   }
 
-  async function gradualFillAndHarvest(durationMs = 2000) {
+  async function gradualFillAndHarvest(durationMs = 3000) { // increased by 1s
     const scroller = getResultsScrollContainer();
     const map = new Map();
     function harvest() {
@@ -475,10 +476,11 @@
     let pageCount = 0;
     while (pageCount < maxPages) {
       pageCount++;
-      await sleep(5000);
-      const jobs = await gradualFillAndHarvest(2000);
-      for (let i = 0; i < jobs.length; i++) {
-        try { await processSingleJob(jobs[i]); } catch {}
+      await sleep(3000); // reduced from 5000
+      const jobs = await gradualFillAndHarvest(3000); // increased from 2000
+      const jobsToProcess = jobs.filter((li) => !hasVAS(li)); // skip Viewed/Applied/Saved
+      for (let i = 0; i < jobsToProcess.length; i++) {
+        try { await processSingleJob(jobsToProcess[i]); } catch {}
         await sleep(400);
       }
       const moved = await goToNextPage();
