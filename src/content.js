@@ -262,6 +262,7 @@
     perJobCooldown.set(jobId, now);
 
     const body = buildRequestBody(descriptionText, jobId);
+    console.log('[LVH] request body', body);
     let text = "";
     try {
       const resp = await fetch(SETTINGS.apiUrl, {
@@ -273,6 +274,7 @@
         body: JSON.stringify(body)
       });
       text = await resp.text();
+      console.log('[LVH] response body', text);
     } catch { return; }
 
     try {
