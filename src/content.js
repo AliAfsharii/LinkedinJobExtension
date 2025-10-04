@@ -59,7 +59,6 @@
     return `${SHARD_PREFIX}${String(next).padStart(4, "0")}`;
   }
   function chooseShardForNew() {
-    // pick the fullest shard with space
     let bestKey = null, bestSize = -1;
     for (const [k, obj] of shards) {
       const size = Object.keys(obj).length;
@@ -87,7 +86,6 @@
     const bit = suitable ? 1 : 0;
     let key = jobToShard.get(jobId);
     if (!key) {
-      // place into existing shard with space, or new shard
       key = chooseShardForNew();
       if (!shards.has(key)) shards.set(key, {});
       jobToShard.set(jobId, key);
@@ -106,7 +104,6 @@
         if (!k.startsWith(SHARD_PREFIX)) continue;
         const newObj = ch.newValue || {};
         shards.set(k, newObj);
-        // rebuild affected ids
         for (const jid of Object.keys(verdicts)) {
           if (jobToShard.get(jid) === k && !(jid in newObj)) {
             delete verdicts[jid];
@@ -262,7 +259,7 @@
     perJobCooldown.set(jobId, now);
 
     const body = buildRequestBody(descriptionText, jobId);
-    console.log('[LVH] request body', body); // log request body
+    console.log('[LVH] request body', body); // request body log
 
     let text = "";
     try {
@@ -275,7 +272,7 @@
         body: JSON.stringify(body)
       });
       text = await resp.text();
-      console.log('[LVH] response body', text); // log response body
+      console.log('[LVH] response body', text); // response body log
     } catch { return; }
 
     try {
@@ -412,7 +409,7 @@
     );
   }
 
-  async function gradualFillAndHarvest(durationMs = 3000) { // increased by 1s
+  async function gradualFillAndHarvest(durationMs = 3000) { // +1s
     const scroller = getResultsScrollContainer();
     const map = new Map();
     function harvest() {
@@ -476,16 +473,19 @@
     let pageCount = 0;
     while (pageCount < maxPages) {
       pageCount++;
-      await sleep(2000);
-      const jobs = await gradualFillAndHarvest(3000);
-      const jobsToProcess = jobs.filter((li) => !hasVAS(li)); // skip Viewed/Applied/Saved
+      await sleep(2000); // 3s after load
+      const jobs = await gradualFillAndHarvest(2000); // 3s scroll
+      const jobsToProcess = jobs.filter((li) => {
+        const id = getJobId(li);
+        return id && !(id in verdicts); // skip if already has verdict
+      });
       for (let i = 0; i < jobsToProcess.length; i++) {
         try { await processSingleJob(jobsToProcess[i]); } catch {}
         await sleep(400);
       }
       const moved = await goToNextPage();
       if (!moved) break;
-      await waitForJobListRefresh(3000);
+      await waitForJobListRefresh(2000); // 1s cap to detect list swap
     }
   }
 
