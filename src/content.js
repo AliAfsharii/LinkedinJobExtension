@@ -476,8 +476,8 @@
     let pageCount = 0;
     while (pageCount < maxPages) {
       pageCount++;
-      await sleep(3000); // reduced from 5000
-      const jobs = await gradualFillAndHarvest(3000); // increased from 2000
+      await sleep(2000);
+      const jobs = await gradualFillAndHarvest(3000);
       const jobsToProcess = jobs.filter((li) => !hasVAS(li)); // skip Viewed/Applied/Saved
       for (let i = 0; i < jobsToProcess.length; i++) {
         try { await processSingleJob(jobsToProcess[i]); } catch {}
@@ -485,7 +485,7 @@
       }
       const moved = await goToNextPage();
       if (!moved) break;
-      await waitForJobListRefresh(10000);
+      await waitForJobListRefresh(3000);
     }
   }
 
