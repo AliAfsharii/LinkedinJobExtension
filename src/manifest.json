@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Linkedin Job Helper",
-  "version": "1.6.0",
+  "version": "1.6.2",
   "description": "Highlights Viewed/Applied/Saved jobs and exports non-VAS jobs to your API.",
   "icons": { "128": "icon.png" },
   "permissions": ["storage", "scripting", "tabs"],

@@ -5,11 +5,12 @@
 
   // ---------- selectors ----------
   const STATE_RE = /\b(Viewed|Applied|Saved)\b/i;
-  const CARD_SEL = 'li[data-occludable-job-id], li.scaffold-layout__list-item, li.occludable-update';
+  // Updated to include new componentkey selectors while keeping fallbacks
+  const CARD_SEL = 'div[componentkey^="job-card-component-ref-"], li[data-occludable-job-id], li.scaffold-layout__list-item, li.occludable-update';
   const FOOTER_SEL = ".job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state";
   const INNER_CARD_SEL = ".job-card-container";
-  const TITLE_LINK_SEL = 'a.job-card-container__link, a[href*="/jobs/view/"]';
-  const DETAILS_CONTAINER_SEL = ".jobs-description, .jobs-description__content, #job-details";
+  // Updated details container
+  const DETAILS_CONTAINER_SEL = 'div[data-sdui-screen="com.linkedin.sdui.flagshipnav.jobs.SemanticJobDetails"], .jobs-description, .jobs-description__content, #job-details';
   const ACTIVE_SEL = '.jobs-search-results-list__list-item--active, [aria-current="page"]';
 
   // ---------- settings ----------
@@ -33,15 +34,19 @@
       .lvh-title-red    { color: #d32f2f !important; }
       .lvh-title-green  { color: #2e7d32 !important; }
       .lvh-title-purple { color: #6a1b9a !important; }
+      /* Fallback for new layout where we might color the whole card text */
+      div[componentkey^="job-card-component-ref-"].lvh-title-red span    { color: #d32f2f !important; }
+      div[componentkey^="job-card-component-ref-"].lvh-title-green span  { color: #2e7d32 !important; }
+      div[componentkey^="job-card-component-ref-"].lvh-title-purple span { color: #6a1b9a !important; }
     `;
     document.head.appendChild(style);
   })();
 
   // ---------- verdict storage (sharded) ----------
-  const SHARD_PREFIX = "lvhs:";       // shard key prefix
-  const SHARD_SIZE = 300;             // max ids per shard
-  const shards = new Map();           // shardKey -> { jobId: 1|0 }
-  const jobToShard = new Map();       // jobId -> shardKey
+  const SHARD_PREFIX = "lvhs:";
+  const SHARD_SIZE = 300;
+  const shards = new Map();
+  const jobToShard = new Map();
   const verdicts = Object.create(null);
   let verdictsLoaded = false;
 
@@ -127,11 +132,23 @@
   // ---------- dom helpers ----------
   const getCardLI = (el) => el.closest?.(CARD_SEL) || null;
   const getInnerCard = (li) => li.querySelector(INNER_CARD_SEL) || li;
-  const getTitleEl = (li) => getInnerCard(li).querySelector(TITLE_LINK_SEL);
+
+  // Updated for new componentkey layout
+  const getTitleEl = (li) => {
+    if (li.hasAttribute("componentkey")) return li;
+    return getInnerCard(li).querySelector('a.job-card-container__link, a[href*="/jobs/view/"]');
+  };
+
+  // Updated ID extraction
   function getJobId(li) {
+    const compKey = li.getAttribute("componentkey");
+    if (compKey && compKey.startsWith("job-card-component-ref-")) {
+      return compKey.replace("job-card-component-ref-", "");
+    }
     const inner = getInnerCard(li);
     return inner.getAttribute("data-job-id") || li.getAttribute("data-occludable-job-id") || "";
   }
+
   function hasVAS(li) {
     for (const f of li.querySelectorAll(FOOTER_SEL)) {
       const txt = (f.textContent || "").trim();
@@ -139,6 +156,7 @@
     }
     return false;
   }
+
   function paintTitle(li) {
     const title = getTitleEl(li);
     if (!title) return;
@@ -151,6 +169,7 @@
     }
     if (hasVAS(li)) title.classList.add("lvh-title-red");
   }
+
   function repaintAll(root = document) { root.querySelectorAll(CARD_SEL).forEach(paintTitle); }
   function scan(root = document) { root.querySelectorAll(CARD_SEL).forEach(paintTitle); scheduleActiveCheck(); }
 
@@ -160,6 +179,7 @@
     if (!marker) return null;
     return getCardLI(marker) || marker.closest?.(CARD_SEL) || null;
   }
+
   let lastActiveJobId = null;
   let activeCheckTimer = null;
   function scheduleActiveCheck() {
@@ -167,20 +187,13 @@
     activeCheckTimer = setTimeout(() => {
       activeCheckTimer = null;
       const li = getActiveCard();
-      let jobId = li ? getJobId(li) : null;
+      let jobId = li ? getJobId(li) : getCurrentJobIdFromPane();
 
-      if (!jobId) {
-        const a = document.querySelector('.job-details-jobs-unified-top-card__job-title a[href*="/jobs/view/"]');
-        if (a && a.href) {
-          const m = a.href.match(/\/jobs\/view\/(\d+)/);
-          if (m) jobId = m[1];
-        }
-      }
       if (!jobId || jobId === lastActiveJobId) return;
       lastActiveJobId = jobId;
 
-      setTimeout(() => {
-        const desc = getCurrentDescriptionText();
+      setTimeout(async () => {
+        const desc = await getCurrentDescriptionTextAsync();
         if (desc) sendForJob(jobId, desc);
         if (li) paintTitle(li);
       }, 350);
@@ -205,9 +218,13 @@
   // ---------- save button helpers ----------
   const saveClickCooldown = new Map();
   function getCurrentJobIdFromPane() {
-    const li = getActiveCard();
-    const idFromList = li ? getJobId(li) : null;
-    if (idFromList) return idFromList;
+    const pane = document.querySelector(DETAILS_CONTAINER_SEL);
+    if (pane) {
+      const match = pane.querySelector('[componentkey^="JobMatchRef_"]');
+      if (match) {
+        return match.getAttribute('componentkey').replace("JobMatchRef_", "");
+      }
+    }
     const a = document.querySelector('.job-details-jobs-unified-top-card__job-title a[href*="/jobs/view/"]');
     if (a && a.href) {
       const m = a.href.match(/\/jobs\/view\/(\d+)/);
@@ -215,9 +232,12 @@
     }
     return null;
   }
+
+  // Updated to include new aria-labels
   function findSaveButtonInPane() {
-    const paneRoot = document.querySelector(".job-details-jobs-unified-top-card__container--two-pane") || document;
+    const paneRoot = document.querySelector(DETAILS_CONTAINER_SEL) || document.querySelector(".job-details-jobs-unified-top-card__container--two-pane") || document;
     const candidates = [
+      'button[aria-label="Save the job"]',
       "button.jobs-save-button",
       "button[data-test-global-save-job-button]",
       '#job-details button[aria-label*="Save"]',
@@ -231,11 +251,13 @@
     }
     return null;
   }
+
   function isSaveButtonPressed(btn) {
     const aria = btn.getAttribute("aria-pressed");
     const txt = (btn.innerText || "").trim();
     return aria === "true" || btn.classList.contains("artdeco-button--pressed") || /\bSaved|Unsave|Saved job/i.test(txt);
   }
+
   function tryAutoSave(jobId) {
     const current = getCurrentJobIdFromPane();
     if (!current || current !== jobId) return;
@@ -245,21 +267,34 @@
     saveClickCooldown.set(jobId, now);
     const btn = findSaveButtonInPane();
     if (!btn || isSaveButtonPressed(btn)) return;
-    try { btn.click(); } catch {}
+    try { btn.click(); } catch { }
   }
 
   // ---------- api call ----------
+  const pendingRequests = new Set();
   const perJobCooldown = new Map();
+
   async function sendForJob(jobId, descriptionText) {
     if (!SETTINGS.apiUrl || !/^https?:\/\//i.test(SETTINGS.apiUrl)) return;
     if (!jobId || !descriptionText) return;
+
+    // FIX 1: Prevent requesting if we already know the verdict
+    if (jobId in verdicts) return;
+
+    // FIX 2: Prevent requesting if we are already waiting for OpenAI
+    if (pendingRequests.has(jobId)) return;
+
+    // Keep the minor cooldown for double-fire edge cases
     const now = Date.now();
     const last = perJobCooldown.get(jobId) || 0;
     if (now - last < 1000) return;
     perJobCooldown.set(jobId, now);
 
+    // FIX 3: Mark this job as currently processing
+    pendingRequests.add(jobId);
+
     const body = buildRequestBody(descriptionText, jobId);
-    console.log('[LVH] request body', body); // request body log
+    console.log('[LVH] request body', body);
 
     let text = "";
     try {
@@ -272,38 +307,68 @@
         body: JSON.stringify(body)
       });
       text = await resp.text();
-      console.log('[LVH] response body', text); // response body log
-    } catch { return; }
+      console.log('[LVH] response body', text);
+    } catch {
+      // Free up the job if the network request fails
+      pendingRequests.delete(jobId);
+      return;
+    }
 
     try {
       const parsed = JSON.parse(text);
       const contentStr =
         parsed?.choices?.[0]?.message?.content ??
         parsed?.message?.content ?? "";
+
       if (typeof contentStr === "string" && contentStr.trim()) {
         const verdictObj = JSON.parse(contentStr);
         const respJobId = verdictObj?.jobId || jobId;
+
         if (typeof verdictObj?.suitable === "boolean" && respJobId) {
           verdicts[respJobId] = verdictObj.suitable;
           await saveVerdictSharded(respJobId, verdictObj.suitable);
 
           const li =
+            document.querySelector(`${CARD_SEL}[componentkey="job-card-component-ref-${respJobId}"]`) ||
             document.querySelector(`${CARD_SEL}[data-occludable-job-id="${respJobId}"]`) ||
             document.querySelector(`${CARD_SEL} .job-card-container[data-job-id="${respJobId}"]`)?.closest(CARD_SEL);
+
           if (li) paintTitle(li); else repaintAll();
 
           if (verdictObj.suitable === true) setTimeout(() => tryAutoSave(respJobId), 400);
+
           if (waitForVerdictResolvers.has(respJobId)) {
             waitForVerdictResolvers.get(respJobId)(verdictObj.suitable);
             waitForVerdictResolvers.delete(respJobId);
           }
         }
       }
-    } catch {}
+    } catch (e) {
+      console.error('[LVH] Error parsing response', e);
+    } finally {
+      // FIX 4: Always remove the job from pending once processing is totally done
+      pendingRequests.delete(jobId);
+    }
   }
 
-  // ---------- description picker (prefer visible #job-details) ----------
-  function getCurrentDescriptionText() {
+  // ---------- async description picker (handles new "more" button) ----------
+  async function getCurrentDescriptionTextAsync() {
+    const pane = document.querySelector(DETAILS_CONTAINER_SEL) || document;
+
+    // Check for the new layout's "more" button and click it to expand text
+    const moreBtn = pane.querySelector('button[data-testid="expandable-text-button"]');
+    if (moreBtn && isVisible(moreBtn)) {
+      try {
+        moreBtn.click();
+        await sleep(150); // wait for DOM to expand
+      } catch (e) { }
+    }
+
+    // Try new layout expandable text box first
+    const newTextBox = pane.querySelector('span[data-testid="expandable-text-box"]');
+    if (newTextBox) return newTextBox.innerText.trim();
+
+    // Fallback to older layouts
     const pickVisible = (nodes) =>
       Array.from(nodes).find((el) => {
         const cs = getComputedStyle(el);
@@ -318,12 +383,6 @@
       pickVisible(document.querySelectorAll('.jobs-description, .jobs-box__html-content, .jobs-description-content'));
 
     if (!el) {
-      const pane =
-        document.querySelector(".job-details-jobs-unified-top-card__container--two-pane") ||
-        document.querySelector("#job-details") ||
-        document.querySelector(".jobs-description-content") ||
-        document.querySelector(DETAILS_CONTAINER_SEL) ||
-        document;
       el =
         pickVisible(pane.querySelectorAll('#job-details, .jobs-box__html-content#job-details')) ||
         pickVisible(pane.querySelectorAll('[data-test-description], .jobs-description, .jobs-box__html-content, .jobs-description-content')) ||
@@ -354,7 +413,8 @@
           n.matches?.(".job-card-container") || n.querySelector?.(".job-card-container") ||
           n.matches?.(FOOTER_SEL) || n.querySelector?.(FOOTER_SEL) ||
           n.matches?.(".job-details-jobs-unified-top-card__container--two-pane") ||
-          n.querySelector?.(".job-details-jobs-unified-top-card__container--two-pane")
+          n.querySelector?.(".job-details-jobs-unified-top-card__container--two-pane") ||
+          n.matches?.(DETAILS_CONTAINER_SEL) || n.querySelector?.(DETAILS_CONTAINER_SEL)
         ) needScan = true;
       }
     }
@@ -379,37 +439,44 @@
     scheduleActiveCheck();
   }, 3000);
   window.addEventListener("beforeunload", () => {
-    try { mo.disconnect(); } catch {}
-    try { clearInterval(intervalId); } catch {}
+    try { mo.disconnect(); } catch { }
+    try { clearInterval(intervalId); } catch { }
   });
 
   // ---------- automation ----------
   const waitForVerdictResolvers = new Map();
+
   function waitForVerdict(jobId, timeoutMs = 15000) {
+    // FIX: If we already evaluated this job, resolve immediately!
+    if (jobId in verdicts) {
+      return Promise.resolve(verdicts[jobId]);
+    }
+
     return new Promise((resolve) => {
       const t = setTimeout(() => {
         if (waitForVerdictResolvers.get(jobId) === resolve) waitForVerdictResolvers.delete(jobId);
-        resolve(null);
+        resolve(null); // This was the 15-second timeout you were experiencing
       }, timeoutMs);
       waitForVerdictResolvers.set(jobId, (val) => { clearTimeout(t); resolve(val); });
     });
   }
 
   function getResultsScrollContainer() {
-    const first = document.querySelector('li[data-occludable-job-id]');
+    const first = document.querySelector(CARD_SEL);
     let el = first ? first.parentElement : null;
     for (let i = 0; i < 6 && el; i++, el = el.parentElement) {
       const cs = getComputedStyle(el);
       if (/(auto|scroll)/.test(cs.overflowY)) return el;
     }
     return (
+      document.querySelector('.left-column-results-container') ||
       document.querySelector('.jobs-search-results-list') ||
       document.querySelector('.jobs-search-results') ||
       document.scrollingElement || document.documentElement
     );
   }
 
-  async function gradualFillAndHarvest(durationMs = 3000) { // +1s
+  async function gradualFillAndHarvest(durationMs = 3000) {
     const scroller = getResultsScrollContainer();
     const map = new Map();
     function harvest() {
@@ -451,6 +518,7 @@
 
   function getJobCardsQuick() {
     const listRoot =
+      document.querySelector('.left-column-results-container') ||
       document.querySelector('.jobs-search-results-list') ||
       document.querySelector('[data-test-reusables-search__result-container]') ||
       document;
@@ -461,10 +529,15 @@
     const jobId = getJobId(li);
     const link = getTitleEl(li);
     if (!jobId || !link) return;
+
+    // FIX: Don't click or process if we already have a verdict for this job
+    if (jobId in verdicts) return;
+
     link.click();
     await sleep(800);
-    const desc = getCurrentDescriptionText();
+    const desc = await getCurrentDescriptionTextAsync();
     if (desc) sendForJob(jobId, desc);
+
     const verdict = await waitForVerdict(jobId);
     if (verdict === true) { tryAutoSave(jobId); await sleep(300); }
   }
@@ -473,24 +546,26 @@
     let pageCount = 0;
     while (pageCount < maxPages) {
       pageCount++;
-      await sleep(2000); // 3s after load
-      const jobs = await gradualFillAndHarvest(2000); // 3s scroll
+      await sleep(2000);
+      const jobs = await gradualFillAndHarvest(2000);
       const jobsToProcess = jobs.filter((li) => {
         const id = getJobId(li);
-        return id && !(id in verdicts); // skip if already has verdict
+        return id && !(id in verdicts);
       });
       for (let i = 0; i < jobsToProcess.length; i++) {
-        try { await processSingleJob(jobsToProcess[i]); } catch {}
+        try { await processSingleJob(jobsToProcess[i]); } catch { }
         await sleep(400);
       }
       const moved = await goToNextPage();
       if (!moved) break;
-      await waitForJobListRefresh(2000); // 1s cap to detect list swap
+      await waitForJobListRefresh(2000);
     }
   }
 
+  // Updated to include new test id
   function findNextPageButton() {
     const candidates = [
+      'button[data-testid="pagination-controls-next-button-visible"]',
       '.jobs-search-pagination__button.jobs-search-pagination__button--next',
       '.jobs-search-pagination__button--next',
       'button[aria-label="View next page"]',
@@ -509,14 +584,16 @@
     }
     return null;
   }
+
   async function goToNextPage() {
     const btn = findNextPageButton();
     if (!btn) return false;
     const oldUrl = location.href;
-    try { btn.click(); } catch {}
+    try { btn.click(); } catch { }
     await waitForUrlChange(oldUrl, 6000);
     return true;
   }
+
   function waitForUrlChange(oldUrl, timeoutMs) {
     return new Promise((resolve) => {
       const start = Date.now();
@@ -526,11 +603,13 @@
       }, 120);
     });
   }
+
   function isVisible(el) {
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
     return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && el.offsetParent !== null;
   }
+
   async function waitForJobListRefresh(timeoutMs = 10000) {
     const beforeIds = getJobCardsQuick().map(getJobId).join(",");
     const start = Date.now();
