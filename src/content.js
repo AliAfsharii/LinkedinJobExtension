@@ -5,11 +5,9 @@
 
   // ---------- selectors ----------
   const STATE_RE = /\b(Viewed|Applied|Saved)\b/i;
-  // Updated to include new componentkey selectors while keeping fallbacks
   const CARD_SEL = 'div[componentkey^="job-card-component-ref-"], li[data-occludable-job-id], li.scaffold-layout__list-item, li.occludable-update';
   const FOOTER_SEL = ".job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state";
   const INNER_CARD_SEL = ".job-card-container";
-  // Updated details container
   const DETAILS_CONTAINER_SEL = 'div[data-sdui-screen="com.linkedin.sdui.flagshipnav.jobs.SemanticJobDetails"], .jobs-description, .jobs-description__content, #job-details';
   const ACTIVE_SEL = '.jobs-search-results-list__list-item--active, [aria-current="page"]';
 
@@ -133,13 +131,11 @@
   const getCardLI = (el) => el.closest?.(CARD_SEL) || null;
   const getInnerCard = (li) => li.querySelector(INNER_CARD_SEL) || li;
 
-  // Updated for new componentkey layout
   const getTitleEl = (li) => {
     if (li.hasAttribute("componentkey")) return li;
     return getInnerCard(li).querySelector('a.job-card-container__link, a[href*="/jobs/view/"]');
   };
 
-  // Updated ID extraction
   function getJobId(li) {
     const compKey = li.getAttribute("componentkey");
     if (compKey && compKey.startsWith("job-card-component-ref-")) {
@@ -233,7 +229,6 @@
     return null;
   }
 
-  // Updated to include new aria-labels
   function findSaveButtonInPane() {
     const paneRoot = document.querySelector(DETAILS_CONTAINER_SEL) || document.querySelector(".job-details-jobs-unified-top-card__container--two-pane") || document;
     const candidates = [
@@ -273,24 +268,30 @@
   // ---------- api call ----------
   const pendingRequests = new Set();
   const perJobCooldown = new Map();
+  const forcedJobChecks = new Set(); // Tracks jobs manually clicked by user
 
   async function sendForJob(jobId, descriptionText) {
     if (!SETTINGS.apiUrl || !/^https?:\/\//i.test(SETTINGS.apiUrl)) return;
     if (!jobId || !descriptionText) return;
 
-    // FIX 1: Prevent requesting if we already know the verdict
-    if (jobId in verdicts) return;
+    const isForced = forcedJobChecks.has(jobId);
 
-    // FIX 2: Prevent requesting if we are already waiting for OpenAI
+    // Prevent requesting if we already know the verdict, UNLESS manually forced by a click
+    if (!isForced && jobId in verdicts) return;
+
+    // Consume the flag so we don't infinitely re-trigger
+    if (isForced) forcedJobChecks.delete(jobId);
+
+    // Prevent requesting if we are already waiting for OpenAI
     if (pendingRequests.has(jobId)) return;
 
-    // Keep the minor cooldown for double-fire edge cases
+    // Keep the minor cooldown for double-fire edge cases (bypass if forced)
     const now = Date.now();
     const last = perJobCooldown.get(jobId) || 0;
-    if (now - last < 1000) return;
+    if (!isForced && now - last < 1000) return;
     perJobCooldown.set(jobId, now);
 
-    // FIX 3: Mark this job as currently processing
+    // Mark this job as currently processing
     pendingRequests.add(jobId);
 
     const body = buildRequestBody(descriptionText, jobId);
@@ -309,7 +310,6 @@
       text = await resp.text();
       console.log('[LVH] response body', text);
     } catch {
-      // Free up the job if the network request fails
       pendingRequests.delete(jobId);
       return;
     }
@@ -346,29 +346,26 @@
     } catch (e) {
       console.error('[LVH] Error parsing response', e);
     } finally {
-      // FIX 4: Always remove the job from pending once processing is totally done
+      // Always remove the job from pending once processing is totally done
       pendingRequests.delete(jobId);
     }
   }
 
-  // ---------- async description picker (handles new "more" button) ----------
+  // ---------- async description picker ----------
   async function getCurrentDescriptionTextAsync() {
     const pane = document.querySelector(DETAILS_CONTAINER_SEL) || document;
 
-    // Check for the new layout's "more" button and click it to expand text
     const moreBtn = pane.querySelector('button[data-testid="expandable-text-button"]');
     if (moreBtn && isVisible(moreBtn)) {
       try {
         moreBtn.click();
-        await sleep(150); // wait for DOM to expand
+        await sleep(150);
       } catch (e) { }
     }
 
-    // Try new layout expandable text box first
     const newTextBox = pane.querySelector('span[data-testid="expandable-text-box"]');
     if (newTextBox) return newTextBox.innerText.trim();
 
-    // Fallback to older layouts
     const pickVisible = (nodes) =>
       Array.from(nodes).find((el) => {
         const cs = getComputedStyle(el);
@@ -391,14 +388,32 @@
     return (el?.innerText || "").trim();
   }
 
-  // ---------- observers ----------
+  // ---------- observers & manual click tracking ----------
   let scanPending = false;
   function scheduleScan(target) {
     if (scanPending) return;
     scanPending = true;
     setTimeout(() => { scanPending = false; scan(target || document); }, 120);
   }
+
   (function initial() { scan(); scheduleActiveCheck(); })();
+
+  // Track explicit manual clicks by the human user
+  document.addEventListener("click", (e) => {
+    if (!e.isTrusted) return; // Ignore automated link.click() from script
+
+    const li = getCardLI(e.target);
+    if (li) {
+      const jobId = getJobId(li);
+      if (jobId) {
+        forcedJobChecks.add(jobId);
+        // Clear active ID so scheduleActiveCheck runs even if clicking the currently active job
+        lastActiveJobId = null;
+        scheduleActiveCheck();
+      }
+    }
+  }, true);
+
   const mo = new MutationObserver((muts) => {
     let needScan = false, sawActive = false;
     for (const m of muts) {
@@ -447,7 +462,6 @@
   const waitForVerdictResolvers = new Map();
 
   function waitForVerdict(jobId, timeoutMs = 15000) {
-    // FIX: If we already evaluated this job, resolve immediately!
     if (jobId in verdicts) {
       return Promise.resolve(verdicts[jobId]);
     }
@@ -455,7 +469,7 @@
     return new Promise((resolve) => {
       const t = setTimeout(() => {
         if (waitForVerdictResolvers.get(jobId) === resolve) waitForVerdictResolvers.delete(jobId);
-        resolve(null); // This was the 15-second timeout you were experiencing
+        resolve(null);
       }, timeoutMs);
       waitForVerdictResolvers.set(jobId, (val) => { clearTimeout(t); resolve(val); });
     });
@@ -530,7 +544,6 @@
     const link = getTitleEl(li);
     if (!jobId || !link) return;
 
-    // FIX: Don't click or process if we already have a verdict for this job
     if (jobId in verdicts) return;
 
     link.click();
@@ -562,7 +575,6 @@
     }
   }
 
-  // Updated to include new test id
   function findNextPageButton() {
     const candidates = [
       'button[data-testid="pagination-controls-next-button-visible"]',
