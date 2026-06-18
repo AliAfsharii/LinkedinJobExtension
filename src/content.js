@@ -212,37 +212,49 @@
   }
 
   // ---------- save button helpers ----------
+  // ---------- save button helpers ----------
   const saveClickCooldown = new Map();
+
   function getCurrentJobIdFromPane() {
-    const pane = document.querySelector(DETAILS_CONTAINER_SEL);
-    if (pane) {
-      const match = pane.querySelector('[componentkey^="JobMatchRef_"]');
-      if (match) {
-        return match.getAttribute('componentkey').replace("JobMatchRef_", "");
-      }
-    }
-    const a = document.querySelector('.job-details-jobs-unified-top-card__job-title a[href*="/jobs/view/"]');
+    // 1. Safest method: LinkedIn always puts the current job ID in the URL
+    const url = new URL(window.location.href);
+    const currentJobId = url.searchParams.get("currentJobId");
+    if (currentJobId) return currentJobId;
+
+    // 2. Fallback for single job view pages
+    const viewMatch = url.pathname.match(/\/jobs\/view\/(\d+)/);
+    if (viewMatch) return viewMatch[1];
+
+    // 3. Fallback to DOM if URL parsing fails
+    const a = document.querySelector('.job-details-jobs-unified-top-card__job-title a[href*="/jobs/view/"], .job-details-jobs-unified-top-card__job-title-link');
     if (a && a.href) {
       const m = a.href.match(/\/jobs\/view\/(\d+)/);
       if (m) return m[1];
     }
+
     return null;
   }
 
   function findSaveButtonInPane() {
-    const paneRoot = document.querySelector(DETAILS_CONTAINER_SEL) || document.querySelector(".job-details-jobs-unified-top-card__container--two-pane") || document;
-    const candidates = [
-      'button[aria-label="Save the job"]',
-      "button.jobs-save-button",
-      "button[data-test-global-save-job-button]",
-      '#job-details button[aria-label*="Save"]',
-      '#job-details button[aria-label*="Saved"]',
-      'button[aria-label*="Save"]',
-      'button[aria-label*="Saved"]'
-    ];
-    for (const sel of candidates) {
-      const btn = paneRoot.querySelector(sel);
-      if (btn) return btn;
+    // 1. Direct class match (LinkedIn's current standard class for this button)
+    let btn = document.querySelector('button.jobs-save-button');
+    if (btn) return btn;
+
+    // 2. Fallback: Search all buttons in the top card area for "Save" text/aria-labels
+    const paneRoot = document.querySelector(".job-details-jobs-unified-top-card__container--two-pane") ||
+      document.querySelector(".jobs-details-top-card") ||
+      document.querySelector(DETAILS_CONTAINER_SEL) ||
+      document;
+
+    const buttons = paneRoot.querySelectorAll('button');
+    for (const b of buttons) {
+      const text = (b.innerText || "").trim().toLowerCase();
+      const aria = (b.getAttribute("aria-label") || "").toLowerCase();
+
+      // Match exact "save" to avoid clicking other random buttons
+      if (text === "save" || aria === "save" || aria.includes("save job")) {
+        return b;
+      }
     }
     return null;
   }
