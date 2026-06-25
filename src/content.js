@@ -6,7 +6,7 @@
   // ---------- selectors ----------
   const STATE_RE = /\b(Viewed|Applied|Saved)\b/i;
   const CARD_SEL = 'div[componentkey^="job-card-component-ref-"], li[data-occludable-job-id], li.scaffold-layout__list-item, li.occludable-update';
-  const FOOTER_SEL = ".job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state";
+  const FOOTER_SEL = ".job-card-container__footer-wrapper li, .job-card-container__footer-item, .job-card-container__footer-job-state, .tvm__text, .artdeco-entity-lockup__caption, ul.job-card-list__footer-wrapper li";
   const INNER_CARD_SEL = ".job-card-container";
   const DETAILS_CONTAINER_SEL = 'div[data-sdui-screen="com.linkedin.sdui.flagshipnav.jobs.SemanticJobDetails"], .jobs-description, .jobs-description__content, #job-details';
   const ACTIVE_SEL = '.jobs-search-results-list__list-item--active, [aria-current="page"]';
@@ -29,13 +29,9 @@
     const style = document.createElement("style");
     style.id = "lvh-style";
     style.textContent = `
-      .lvh-title-red    { color: #d32f2f !important; }
-      .lvh-title-green  { color: #2e7d32 !important; }
-      .lvh-title-purple { color: #6a1b9a !important; }
-      /* Fallback for new layout where we might color the whole card text */
-      div[componentkey^="job-card-component-ref-"].lvh-title-red span    { color: #d32f2f !important; }
-      div[componentkey^="job-card-component-ref-"].lvh-title-green span  { color: #2e7d32 !important; }
-      div[componentkey^="job-card-component-ref-"].lvh-title-purple span { color: #6a1b9a !important; }
+      .lvh-title-red, .lvh-title-red * { color: #d32f2f !important; }
+      .lvh-title-green, .lvh-title-green * { color: #2e7d32 !important; }
+      .lvh-title-purple, .lvh-title-purple * { color: #6a1b9a !important; }
     `;
     document.head.appendChild(style);
   })();
@@ -178,22 +174,30 @@
 
   let lastActiveJobId = null;
   let activeCheckTimer = null;
+
   function scheduleActiveCheck() {
-    if (activeCheckTimer) return;
-    activeCheckTimer = setTimeout(() => {
+    if (activeCheckTimer) clearTimeout(activeCheckTimer); // Wait for fast clicking to settle
+    activeCheckTimer = setTimeout(async () => {
       activeCheckTimer = null;
       const li = getActiveCard();
       let jobId = li ? getJobId(li) : getCurrentJobIdFromPane();
 
-      if (!jobId || jobId === lastActiveJobId) return;
+      if (!jobId) return;
+
+      // 1. Grab description FIRST, before locking lastActiveJobId
+      const desc = await getCurrentDescriptionTextAsync();
+
+      // 2. If the description is empty/short, LinkedIn is still loading it.
+      // Abort here so the next DOM mutation will try again automatically.
+      if (!desc || desc.trim().length < 30) return;
+
+      // 3. Only lock the ID once we successfully have the job data
+      if (jobId === lastActiveJobId) return;
       lastActiveJobId = jobId;
 
-      setTimeout(async () => {
-        const desc = await getCurrentDescriptionTextAsync();
-        if (desc) sendForJob(jobId, desc);
-        if (li) paintTitle(li);
-      }, 350);
-    }, 120);
+      sendForJob(jobId, desc);
+      if (li) paintTitle(li);
+    }, 300);
   }
 
   // ---------- request body ----------
@@ -419,11 +423,10 @@
       const jobId = getJobId(li);
       if (jobId) {
         forcedJobChecks.add(jobId);
-        // Clear active ID so scheduleActiveCheck runs even if clicking the currently active job
         lastActiveJobId = null;
-        scheduleActiveCheck();
       }
     }
+    scheduleActiveCheck();
   }, true);
 
   const mo = new MutationObserver((muts) => {
